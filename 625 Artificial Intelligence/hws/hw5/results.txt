@@ -1,0 +1,99 @@
+1.
+grandparent(charles,X).
+X = george
+X = charlotte
+X = louis
+X = archie
+2.
+brother(william,Y), spouse(Y,X).
+X = meghan,
+Y = harry
+X = meghan,
+Y = harry
+3.
+stepmother(X,william).
+X = camila
+false
+4.
+uncle(X,charlotte).
+X = harry
+X = harry
+false
+5.
+aunt(X,archie).
+X = catherine
+X = catherine
+6.
+nephew(X,harry).
+X = george
+X = louis
+X = george
+X = louis
+7.
+sibling(X,Y).
+X = william,
+Y = harry
+X = harry,
+Y = william
+X = william,
+Y = harry
+X = harry,
+Y = william
+X = george,
+Y = charlotte
+X = george,
+Y = louis
+X = charlotte,
+Y = george
+X = charlotte,
+Y = louis
+X = louis,
+Y = george
+X = louis,
+Y = charlotte
+X = george,
+Y = charlotte
+X = george,
+Y = louis
+X = charlotte,
+Y = george
+X = charlotte,
+Y = louis
+X = louis,
+Y = george
+X = louis,
+Y = charlotte
+8.
+cousin(X,Y), female(X).
+X = charlotte,
+Y = archie
+X = charlotte,
+Y = archie
+9.
+niece(X,Y).
+X = charlotte,
+Y = harry
+X = charlotte,
+Y = harry
+10.
+parent(X,Y), stepmother(Z,X).
+X = harry,
+Y = archie,
+Z = camila
+X = william,
+Y = george,
+Z = camila
+X = william,
+Y = charlotte,
+Z = camila
+X = william,
+Y = louis,
+Z = camila
+11.
+decendant(diana,X).
+X = william
+X = harry
+X = george
+X = charlotte
+X = louis
+X = archie
