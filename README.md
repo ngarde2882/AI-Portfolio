@@ -5,9 +5,13 @@ This repository collects AI and machine learning projects from my graduate cours
 Most projects are class-based, and one folder includes an early-stage reinforcement learning agent for Rocket League.
 
 ## Contents
-
 - `625_AI/` — Conceptual and historical foundations of AI with some ML assignments
 - `633_MachineLearning/` — Classical ML algorithms, exploratory notebooks, and cgm/viome ML project
 - `648_DeepRL/` — Implementations of multiple RL algorithms and a Pokémon Showdown agent
 - `CSCE6363DL_git/` — Deep learning projects with CNNs, RNNs, and transformers
 - `RL/` — Rocket League RL project
+
+## Current Work
+I am currently enrolled in these classes
+- `631_IntelligentAgents/` — Game-theory heavy
+- `676_DataMiningandAnalysis/` — Data collection, observation, and manipulation
