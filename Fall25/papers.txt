@@ -1,0 +1,69 @@
+Divide and Conquer: Grounding LLMs as Efficient Decision-Making Agents via Offline Hierarchical Reinforcement Learning
+Zican Hu,Wei Liu,Xiaoye Qu,Xiangyu Yue,Chunlin Chen,Zhi Wang,Yu Cheng
+https://openreview.net/forum?id=pdNtji3ktF&noteId=TnkdScrvgI
+    1 agent HRL
+    LLM + AC - GLIDER
+    Divide & Conquer - break down problems into smaller and smaller sub-problems
+    LLM trained on demonstration trajectories
+    Supervised Fine Tuning would make this approach very difficult, but the paper praises the efficiency of training (in simpler domain)
+    LLM breaks down the task into low-level 'skills' performed by AC networks, trained on sample policies
+    -environment observations and actions are text-based instead of mapped controls as in planned domain
+
+
+The Surprising Effectiveness of PPO in Cooperative Multi-Agent Games
+Google Research, Brain Team
+https://arxiv.org/pdf/2103.01955
+    MARL
+    PPO
+    Decentralized PPO as a strong MARL baseline in various MARL domains
+    +cites StarCraft as potential domain, a complex and changing domain with "game-like" action space
+    +simple and could be implemented alongside more complex designs to serve as a baseline throughout the training process
+
+
+Google Research Football
+https://ar5iv.labs.arxiv.org/html/1907.11180
+    MARL capable
+    Introduces event based reward shaping in the GRF environment
+    +simple events would likely be viable for high-level team policy making over long time-periods
+    +directed event based reward shaping could be suitable for low-level policies to improve skills/behaviors
+
+
+EMERGENT COORDINATION THROUGH COMPETITION
+Siqi Liu,Guy Lever,Josh Merel,Saran Tunyasuvunakool,Nicolas Heess,Thore Graepel
+https://arxiv.org/abs/1902.07151
+    MARL
+    Hyperparameter optimization - Population Based Training
+    Online reward shaping - Stochastic Value Gradients SVG0
+        AC policy gradient effective for continuous control
+    MuJoCo Soccer utilizing PBT and SVG0 (on very simple observations, converging reward and discount)
+    +displays evidence towards emerging cooperative behaviors through simple shaped observation and reward shaping
+
+
+Multi-Agent Reinforcement Learning with Emergent Roles
+Tonghan Wang,Heng Dong,Victor Lesser,Chongjie Zhang
+https://proceedings.mlr.press/v119/wang20f/wang20f.pdf
+LEARNING ROLES TO DECOMPOSE MULTI-AGENT TASKS
+Tonghan Wang,Tarun Gupta,Anuj Mahajan,Bei Peng,Shimon Whiteson,Chongjie Zhang
+https://openreview.net/forum?id=TTUVg6vkNjK
+    MARL
+    QLearning - ROMA/RODE
+    CTDE - Centralized Training, Decentralized Execution
+    Uses clustering on Q-Learning to assess action space and trains a role selector to break down tasks
+
+
+The Option-Critic Architecture
+Pierre-Luc Bacon,Jean Harb,Doina Precup
+https://ojs.aaai.org/index.php/AAAI/article/view/10916/10775
+    MARL
+    Architecture for higher level behavior selector that can be applied to skill switch penalty, event-driven skill termination
+
+
+Open-Ended Learning Leads to Generally Capable Agents
+https://arxiv.org/abs/2107.12808
+Deep Mind team
+    MARL
+    V-MPO - GOAT
+    Dynamic Task Generation & Population based training
+    Generational training
+    Goal Attention
+    An encticing approach to skill development very in-line with how I would like to execute this project
