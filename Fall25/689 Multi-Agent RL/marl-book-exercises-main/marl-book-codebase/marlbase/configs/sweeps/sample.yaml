@@ -1,0 +1,29 @@
+# constants
+algorithm.save_interval: False
+algorithm.eval_episodes: 10
+algorithm.video_interval: False
+
+# top-level choice (grid) search
+algorithm.standardise_returns:
+  - True
+  - False
+
+hparam-tuples-1:
+  - !!python/tuple [env.name: lbforaging:Foraging-10x10-3p-3f-v3, env.time_limit: 25]
+  - !!python/tuple [env.name: lbforaging:Foraging-8x8-2p-2f-coop-v3, env.time_limit: 25]
+
+hparam-tuples-2:
+  - !!python/tuple 
+    - "+algorithm": "idqn"
+    - algorithm.total_steps: 2_000_000 
+    - algorithm.batch_size:
+      - 128
+      - 256
+
+  - !!python/tuple 
+    - "+algorithm": "ia2c"
+    - algorithm.total_steps: 2_000_000
+    - algorithm.entropy_coef:
+      - 0.01
+      - 0.001
+  

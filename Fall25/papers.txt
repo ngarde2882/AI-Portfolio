@@ -66,4 +66,8 @@ Deep Mind team
     Dynamic Task Generation & Population based training
     Generational training
     Goal Attention
-    An encticing approach to skill development very in-line with how I would like to execute this project
+    An enticing approach to skill development very in-line with how I would like to execute this project
+
+
+MARL framework
+mapping framework to environment

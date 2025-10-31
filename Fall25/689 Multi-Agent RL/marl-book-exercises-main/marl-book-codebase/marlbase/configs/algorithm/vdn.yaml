@@ -1,0 +1,13 @@
+# @package _global_
+
+defaults:
+  - idqn
+
+env:
+  wrappers :
+    - CooperativeReward
+
+algorithm:
+  name: "vdn"
+  model:
+    _target_: dqn.model.VDNetwork

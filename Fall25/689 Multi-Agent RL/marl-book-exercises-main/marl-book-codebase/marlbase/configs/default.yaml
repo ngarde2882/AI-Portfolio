@@ -1,0 +1,35 @@
+defaults:
+  - _self_
+  - logger: filesystemlogger
+  - override hydra/job_logging: file
+  - override hydra/launcher: submitit_local
+  
+hydra:
+  run:
+    dir: outputs/${env.name}/${algorithm.name}/${random:4}
+  launcher:
+    timeout_min: 2880
+    cpus_per_task: 1
+    mem_gb: 4
+  job:
+    chdir: True
+
+seed: null
+
+algorithm:
+  total_steps: 100_000
+  log_interval: 10_000
+  save_interval: False
+  eval_interval: 10_000
+  eval_episodes: 100
+  video_interval: False
+  video_frames: 500
+
+env:
+  _target_: utils.envs.make_env
+  name : ???
+  time_limit : ???
+  clear_info: False
+  observe_id: False
+  standardise_rewards: False
+  wrappers : null
