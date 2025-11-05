@@ -1,14 +1,12 @@
 import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath('C:\\Users\\nick2\\Desktop\\School Stuff\\stats\\AI-Portfolio\\Fall25\\689 Multi-Agent RL\\marl-book-exercises-main\\marl-book-codebase\\marlbase')))
+
+from omegaconf import OmegaConf, DictConfig
 
 import hydra
 import numpy as np
-from omegaconf import OmegaConf, DictConfig
 import torch
-
-OmegaConf.register_new_resolver(
-    "random",
-    lambda x: os.urandom(x).hex(),
-)
 
 
 @hydra.main(config_path="configs", config_name="default", version_base="1.3")

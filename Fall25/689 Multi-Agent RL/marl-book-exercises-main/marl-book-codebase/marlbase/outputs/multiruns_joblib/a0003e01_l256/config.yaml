@@ -1,0 +1,51 @@
+seed: 0
+algorithm:
+  total_steps: 1000000
+  log_interval: 10000
+  save_interval: false
+  eval_interval: 10000
+  eval_episodes: 100
+  video_interval: 200000
+  video_frames: 500
+  _target_: ac.train.main
+  name: ia2c
+  model:
+    _target_: ac.model.A2CNetwork
+    actor:
+      layers:
+      - 256
+      - 256
+      parameter_sharing: false
+      use_orthogonal_init: true
+      use_rnn: false
+    critic:
+      centralised: false
+      layers:
+      - 256
+      - 256
+      parameter_sharing: false
+      use_orthogonal_init: true
+      use_rnn: false
+    device: cpu
+  optimizer: Adam
+  lr: 0.0003
+  grad_clip: false
+  n_steps: 5
+  gamma: 0.99
+  entropy_coef: 0.01
+  value_loss_coef: 0.5
+  use_proper_termination: false
+  standardise_returns: false
+  target_update_interval_or_tau: 200
+env:
+  _target_: utils.envs.make_env
+  name: lbforaging:Foraging-8x8-3p-2f-v3
+  time_limit: 50
+  clear_info: false
+  observe_id: false
+  standardise_rewards: true
+  wrappers: null
+  parallel_envs: 10
+logger:
+  _target_: utils.loggers.FileSystemLogger
+  project_name: fastmarl

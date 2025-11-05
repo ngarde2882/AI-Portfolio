@@ -10,6 +10,7 @@ import torch
 
 from marlbase.utils.video import VideoRecorder
 
+import imageio
 
 Batch = namedtuple(
     "Batch", ["obss", "actions", "rewards", "dones", "filled", "action_masks"]
@@ -120,36 +121,64 @@ def _collect_trajectories(
 
 
 def record_episodes(env, model, n_timesteps, path, device):
-    recorder = VideoRecorder()
-    done = True
+    """Save headless RGB frames to a video without displaying windows."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    writer = imageio.get_writer(path, fps=30)
 
+    done = True
     for _ in range(n_timesteps):
         if done:
             obss, info = env.reset()
             hiddens = model.init_actor_hiddens(1)
-            if "action_mask" in info:
-                action_mask = torch.tensor(
-                    info["action_mask"], dtype=torch.float32, device=device
-                )
-            else:
-                action_mask = None
+            action_mask = torch.tensor(info["action_mask"], dtype=torch.float32, device=device) if "action_mask" in info else None
             done = False
         else:
             with torch.no_grad():
-                obss = torch.tensor(obss, dtype=torch.float32, device=device).unsqueeze(
-                    1
-                )
+                obss = torch.tensor(obss, dtype=torch.float32, device=device).unsqueeze(1)
                 actions, hiddens = model.act(obss, hiddens, action_mask)
                 obss, _, done, truncated, info = env.step([a.item() for a in actions])
                 if "action_mask" in info:
-                    action_mask = torch.tensor(
-                        info["action_mask"], dtype=torch.float32, device=device
-                    )
+                    action_mask = torch.tensor(info["action_mask"], dtype=torch.float32, device=device)
             done = done or truncated
-        recorder.record_frame(env)
 
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    recorder.save(path)
+        try:
+            frame = env.render()
+            if isinstance(frame, np.ndarray):
+                writer.append_data(frame)
+        except Exception:
+            pass
+
+    writer.close()
+    # recorder = VideoRecorder()
+    # done = True
+
+    # for _ in range(n_timesteps):
+    #     if done:
+    #         obss, info = env.reset()
+    #         hiddens = model.init_actor_hiddens(1)
+    #         if "action_mask" in info:
+    #             action_mask = torch.tensor(
+    #                 info["action_mask"], dtype=torch.float32, device=device
+    #             )
+    #         else:
+    #             action_mask = None
+    #         done = False
+    #     else:
+    #         with torch.no_grad():
+    #             obss = torch.tensor(obss, dtype=torch.float32, device=device).unsqueeze(
+    #                 1
+    #             )
+    #             actions, hiddens = model.act(obss, hiddens, action_mask)
+    #             obss, _, done, truncated, info = env.step([a.item() for a in actions])
+    #             if "action_mask" in info:
+    #                 action_mask = torch.tensor(
+    #                     info["action_mask"], dtype=torch.float32, device=device
+    #                 )
+    #         done = done or truncated
+    #     recorder.record_frame(env)
+
+    # Path(path).parent.mkdir(parents=True, exist_ok=True)
+    # recorder.save(path)
 
 
 def main(envs, eval_env, logger, time_limit, **cfg):

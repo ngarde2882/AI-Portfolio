@@ -1,0 +1,6 @@
+{
+  "python.analysis.extraPaths": [
+    "C:\\Users\\nick2\\anaconda3\\envs\\RL\\Lib\\site-packages"
+  ],
+  "python.terminal.activateEnvironment": true
+}

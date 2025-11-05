@@ -1,0 +1,9 @@
+- +algorithm=ia2c
+- env.name=lbforaging\:Foraging-8x8-3p-2f-v3
+- env.time_limit=50
+- env.standardise_rewards=True
+- algorithm.total_steps=1000000
+- algorithm.name=ia2c
+- algorithm.video_interval=200000
+- seed=0
+- algorithm.entropy_coef=0.1
