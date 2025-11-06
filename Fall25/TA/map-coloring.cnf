@@ -1,0 +1,60 @@
+c australia map coloring problem (3 colors)
+p cnf 28 55
+c every country must have 1 color (7)
+NSWG NSWR NSWB 0
+NTG NTR NTB 0
+QG QR QB 0
+SAG SAR SAB 0
+TG TR TB 0
+VG VR VB 0
+WAG WAR WAB 0
+c every country has at most 1 color (21)
+-NSWG -NSWR 0
+-NSWG -NSWB 0
+-NSWR -NSWB 0
+-NTG -NTR 0
+-NTG -NTB 0
+-NTR -NTB 0
+-QG -QR 0
+-QG -QB 0
+-QR -QB 0
+-SAG -SAR 0
+-SAG -SAB 0
+-SAR -SAB 0
+-TG -TR 0
+-TG -TB 0
+-TR -TB 0
+-VG -VR 0
+-VG -VB 0
+-VR -VB 0
+-WAG -WAR 0
+-WAG -WAB 0
+-WAR -WAB 0
+c bordering countries cannot have the same color (27)
+-NWSG -QG 0
+-NWSR -QR 0
+-NWSB -QB 0
+-NWSG -SAG 0
+-NWSR -SAR 0
+-NWSB -SAB 0
+-NSWG -VG 0
+-NSWR -VR 0
+-NSWB -VB 0
+-NTG -QG 0
+-NTR -QR 0
+-NTB -QB 0
+-NTG -SAG 0
+-NTR -SAR 0
+-NTB -SAB 0
+-NTG -WAG 0
+-NTR -WAR 0
+-NTB -WAB 0
+-QG -SAG 0
+-QR -SAR 0
+-QB -SAB 0
+-SAG -VG 0
+-SAR -VR 0
+-SAB -VB 0
+-SAG -WAG 0
+-SAR -WAR 0
+-SAB -WAB 0
