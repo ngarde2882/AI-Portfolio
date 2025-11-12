@@ -43,42 +43,144 @@ class TeamActorCritic(nn.Module):
 
 
 # ===============================
-# LOW-LEVEL BEHAVIOR (tabular placeholder)
+# PPO for low-level agents
 # ===============================
-class QLearningBehavior:
-    def __init__(self, n_actions, obs_size, reward_features, lr=0.01, gamma=0.99, epsilon=0.1):
-        # NOTE: this tabular Q assumes a discrete observation index; adapt to function approximation for real usage
-        self.q_table = np.zeros((obs_size, n_actions))
-        self.lr = lr
-        self.gamma = gamma
-        self.epsilon = epsilon
+import math
+from dataclasses import dataclass
+
+class PPONet(nn.Module):
+    def __init__(self, obs_size: int, n_actions: int, hidden=256):
+        super().__init__()
+        self.pi = nn.Sequential(
+            nn.Linear(obs_size, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, n_actions),
+        )
+        self.v = nn.Sequential(
+            nn.Linear(obs_size, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, obs):  # obs: (B, obs_size)
+        logits = self.pi(obs)
+        value = self.v(obs)
+        return logits, value
+
+
+@dataclass
+class PPOHyper:
+    gamma: float = 0.99
+    lam: float = 0.95
+    clip_eps: float = 0.2
+    ent_coef: float = 0.01
+    vf_coef: float = 0.5
+    lr: float = 3e-4
+    batch_size: int = 2048
+    epochs: int = 4
+
+
+class PPOBuffer:
+    def __init__(self, obs_dim, size, n_actions):
+        self.obs = np.zeros((size, obs_dim), np.float32)
+        self.acts = np.zeros((size,), np.int64)
+        self.logp = np.zeros((size,), np.float32)
+        self.rew = np.zeros((size,), np.float32)
+        self.val = np.zeros((size,), np.float32)
+        self.done = np.zeros((size,), np.float32)
+        self.ptr = 0
+        self.max_size = size
+
+    def add(self, obs, act, logp, rew, val, done):
+        i = self.ptr
+        self.obs[i] = obs
+        self.acts[i] = act
+        self.logp[i] = logp
+        self.rew[i] = rew
+        self.val[i] = val
+        self.done[i] = float(done)
+        self.ptr += 1
+
+    def reset(self):
+        self.ptr = 0
+
+    def full(self):
+        return self.ptr >= self.max_size
+
+    def compute_gae(self, gamma, lam):
+        adv = np.zeros_like(self.rew)
+        ret = np.zeros_like(self.rew)
+        gae = 0.0
+        next_value = 0.0
+        for t in reversed(range(self.ptr)):
+            mask = 1.0 - self.done[t]
+            delta = self.rew[t] + gamma * next_value * mask - self.val[t]
+            gae = delta + gamma * lam * mask * gae
+            adv[t] = gae
+            ret[t] = adv[t] + self.val[t]
+            next_value = self.val[t]
+        # normalize advantages
+        a_std = adv[:self.ptr].std() + 1e-8
+        a_mean = adv[:self.ptr].mean()
+        adv[:self.ptr] = (adv[:self.ptr] - a_mean) / a_std
+        return adv[:self.ptr], ret[:self.ptr]
+
+class PPOAgent:
+    """
+    One PPO policy per-player (you can share weights if you want).
+    Uses discrete 90-way actions.
+    """
+    def __init__(self, obs_size, n_actions, hyper=PPOHyper(), device="cpu"):
+        self.net = PPONet(obs_size, n_actions).to(device)
+        self.opt = optim.Adam(self.net.parameters(), lr=hyper.lr)
+        self.h = hyper
+        self.device = device
+        self.buffer = PPOBuffer(obs_size, hyper.batch_size, n_actions)
         self.n_actions = n_actions
-        # reward_features: dict[name -> callable(obs, info) -> float]
-        self.reward_features = reward_features
 
-    def compute_feature_rewards(self, obs, info):
-        results = {}
-        for name, fn in self.reward_features.items():
-            try:
-                results[name] = float(fn(obs, info))
-            except Exception:
-                results[name] = 0.0
-        return results
+    @torch.no_grad()
+    def act(self, obs_np):
+        # obs_np: (obs_size,)
+        obs = torch.as_tensor(obs_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+        logits, v = self.net(obs)
+        dist = torch.distributions.Categorical(logits=logits)
+        a = dist.sample()
+        logp = dist.log_prob(a)
+        return int(a.item()), float(logp.item()), float(v.item())
 
-    def total_reward(self, feature_rewards, weights=None):
-        if weights is None:
-            weights = {k: 1.0 for k in feature_rewards.keys()}
-        return sum(feature_rewards[k] * weights.get(k, 1.0) for k in feature_rewards)
+    def store(self, *transition):
+        self.buffer.add(*transition)
 
-    def select_action(self, state_idx):
-        if random.random() < self.epsilon:
-            return random.randint(0, self.n_actions - 1)
-        return int(np.argmax(self.q_table[state_idx]))
+    def update(self):
+        buf = self.buffer
+        adv, ret = buf.compute_gae(self.h.gamma, self.h.lam)
 
-    def update(self, state_idx, action, reward, next_state_idx, done):
-        max_next = np.max(self.q_table[next_state_idx]) if not done else 0.0
-        td_target = reward + self.gamma * max_next
-        self.q_table[state_idx, action] += self.lr * (td_target - self.q_table[state_idx, action])
+        obs = torch.as_tensor(buf.obs[:buf.ptr], dtype=torch.float32, device=self.device)
+        acts = torch.as_tensor(buf.acts[:buf.ptr], dtype=torch.int64, device=self.device)
+        logp_old = torch.as_tensor(buf.logp[:buf.ptr], dtype=torch.float32, device=self.device)
+        adv_t = torch.as_tensor(adv, dtype=torch.float32, device=self.device)
+        ret_t = torch.as_tensor(ret, dtype=torch.float32, device=self.device)
+
+        for _ in range(self.h.epochs):
+            logits, values = self.net(obs)
+            dist = torch.distributions.Categorical(logits=logits)
+            logp = dist.log_prob(acts)
+            ratio = (logp - logp_old).exp()
+            # policy loss (clipped)
+            unclipped = ratio * adv_t
+            clipped = torch.clamp(ratio, 1.0 - self.h.clip_eps, 1.0 + self.h.clip_eps) * adv_t
+            pi_loss = -torch.min(unclipped, clipped).mean()
+            # value loss
+            v_loss = 0.5 * (ret_t - values.squeeze(-1)).pow(2).mean()
+            # entropy bonus
+            ent = dist.entropy().mean()
+            loss = pi_loss + self.h.vf_coef * v_loss - self.h.ent_coef * ent
+
+            self.opt.zero_grad()
+            loss.backward()
+            self.opt.step()
+
+        buf.reset()
 
 
 # ===============================
@@ -272,14 +374,14 @@ def supersonic_bonus(obs, info):
 
 
 # ===============================
-# HIERARCHICAL CONTROLLER
+# HIERARCHICAL CONTROLLER  (obs_size, n_actions, hyper=PPOHyper(), device="cpu") TODO
 # ===============================
 class HierarchicalRLAgent:
     def __init__(self, obs_size, n_players, reward_categories, n_actions):
         self.n_categories = len(reward_categories)
         self.team_controller = TeamActorCritic(obs_size, self.n_categories)
         self.behaviors = [
-            [QLearningBehavior(n_actions, obs_size, reward_features=wset) for wset in category]
+            [PPOAgent(obs_size, n_actions, reward_features=wset) for wset in category]
             for category in reward_categories
         ]
         self.n_players = n_players
@@ -335,60 +437,81 @@ def build_observation_from_info(info):
 # --- Engine boot & adapter ----------------------------------------------------
 
 def initialize_engine_with_state(engine, initial_state=None):
-    """
-    No mutators for now.
-    1) base_state = engine.create_base_state() if initial_state is None
-    2) engine.set_state(state, shared)
-    """
     gs = initial_state if initial_state is not None else engine.create_base_state()
     engine.set_state(gs, shared_info={})
     return engine, gs
 
 
 class EngineEnvAdapter:
-    def __init__(self, engine, action_parser=None, action_mode="discrete",
-                 agent_selector=None, obs_fn=None, reward_fn=None, reward_function=None):  # <-- add reward_function
+    """
+    Discrete low-level control with hotswap rewards.
+    Exposes BOTH:
+      - ll_obs[agent_id]: low-level obs for PPO
+      - ac_obs: team-level obs for top AC (built via its own DefaultObs)
+    """
+    def __init__(self,
+                 engine,
+                 action_parser,
+                 reward_function,               # HotswapRewardAdapter (per-player rewards)
+                 ll_obs_builder: DefaultObs,    # low-level obs builder
+                 ac_obs_builder: DefaultObs,    # AC obs builder (separate instance)
+                 action_mode="discrete",
+                 agent_selector=None):
         self.engine = engine
         self.action_parser = action_parser
         self.action_mode = action_mode
+        self.reward_function = reward_function
+        self.ll_obs_builder = ll_obs_builder
+        self.ac_obs_builder = ac_obs_builder
         self.agent_selector = agent_selector
-        self.obs_fn = obs_fn or build_observation_from_info
-        self.reward_fn = reward_fn
-        self.reward_function = reward_function  # <-- store it
+
+    def _build_ll_obs(self, state):
+        # build per-agent observations
+        obs_map = {}
+        for aid in state.cars.keys():
+            obs_map[aid] = self.ll_obs_builder.build_obs(aid, state, shared_info={})
+        return obs_map
+
+    def _build_ac_obs(self, state):
+        # simplest path: build obs for each friendly agent and concatenate (or just use the first)
+        # Here we use the first agent's obs as AC observation placeholder; replace with your team encoding.
+        aid0 = next(iter(state.cars.keys()))
+        return self.ac_obs_builder.build_obs(aid0, state, shared_info={})
 
     def reset(self, initial_state=None):
         _, state = initialize_engine_with_state(self.engine, initial_state=initial_state)
-        agent_id = (self.agent_selector(state) if self.agent_selector else next(iter(state.cars.keys())))
-        # if using a RewardFunction (hotswap), reset it now
-        if self.reward_function is not None:
-            self.reward_function.reset([agent_id], state, {})
-        info = build_info_from_state(state, agent_id)
-        obs = self.obs_fn(info)
-        return obs
+        # reset reward function with current agents
+        agent_ids = list(state.cars.keys())
+        self.reward_function.reset(agent_ids, state, {})
+        ll_obs = self._build_ll_obs(state)
+        ac_obs = self._build_ac_obs(state)
+        # Gym-like reset returns something — we’ll return the first agent’s LL obs,
+        # but stash both in info for training code.
+        first_obs = ll_obs[agent_ids[0]]
+        info = {"ll_obs": ll_obs, "ac_obs": ac_obs}
+        return first_obs, info
 
     def step(self, actions_dict, shared_info=None):
+        # actions_dict: {AgentID: np.array([discrete_id])}
         prev_state = self.engine.state
-        if self.action_mode == "discrete":
-            assert self.action_parser is not None, "action_parser required for discrete action mode"
-            controls_map = self.action_parser.parse_actions(actions_dict, prev_state, shared_info or {})
-        else:
-            controls_map = actions_dict
-
+        controls_map = self.action_parser.parse_actions(actions_dict, prev_state, shared_info or {})
         state = self.engine.step(controls_map, shared_info or {})
-        agent_id = (self.agent_selector(state) if self.agent_selector else next(iter(state.cars.keys())))
-        info = build_info_from_state(state, agent_id)
-        obs = self.obs_fn(info)
 
-        if self.reward_function is not None:
-            rmap = self.reward_function.get_rewards([agent_id], state, {agent_id: False}, {agent_id: False}, shared_info or {})
-            reward = float(rmap[agent_id])
-        elif self.reward_fn is not None:
-            reward = float(self.reward_fn(obs, info))
-        else:
-            reward = 0.0
-
+        agent_ids = list(state.cars.keys())
+        # rewards via hotswap composites (per-agent)
+        rmap = self.reward_function.get_rewards(agent_ids, state, {aid: False for aid in agent_ids},
+                                                {aid: False for aid in agent_ids}, shared_info or {})
+        # observations
+        ll_obs = self._build_ll_obs(state)
+        ac_obs = self._build_ac_obs(state)
+        # termination heuristic
         done = bool(getattr(state, "goal_scored", False))
-        return obs, reward, done, info
+        # Return first agent’s obs in obs slot; everything else in info
+        first_obs = ll_obs[agent_ids[0]]
+        info = {"ll_obs": ll_obs, "ac_obs": ac_obs, "rewards": rmap}
+        # reward: sum or first — for compatibility, return sum; training can use info['rewards'] per agent
+        reward_scalar = float(sum(rmap.values()))
+        return first_obs, reward_scalar, done, info
 
 
 # ===============================
@@ -429,24 +552,46 @@ positioning_rewards = {
 from hotswap_hrl import AgentProfile, TeamProfilePool, HotswapManager, HotswapRewardAdapter, default_policy_factory
 from reward_native_classes import StrikerCompositeReward, DefenderCompositeReward, PositioningCompositeReward
 from rlgym.rocket_league.sim import RocketSimEngine
+# engine + action parser
 engine = RocketSimEngine(rlbot_delay=True)
-# --- Build a profile pool with a few genomes (weights are mutable and saved verbatim) ---
+N_ACTIONS = 90
+action_parser = RepeatAction(LookupTableAction(), repeats=8)
+
+# profile pools / hotswap
 blue_pool = TeamProfilePool()
-blue_pool.add(AgentProfile(name="S_base", role="striker",     weights=StrikerCompositeReward().get_weights()))
-blue_pool.add(AgentProfile(name="S_agro", role="striker",     weights={**StrikerCompositeReward().get_weights(), "shot_alignment": 1.2, "goal": 12.0}))
-blue_pool.add(AgentProfile(name="D_base", role="defender",    weights=DefenderCompositeReward().get_weights()))
-blue_pool.add(AgentProfile(name="P_base", role="positioning", weights=PositioningCompositeReward().get_weights()))
+blue_pool.add(AgentProfile("S_base", "striker",     StrikerCompositeReward().get_weights()))
+blue_pool.add(AgentProfile("S_agro", "striker",     {**StrikerCompositeReward().get_weights(), "shot_alignment": 1.2, "goal": 12.0}))
+blue_pool.add(AgentProfile("D_base", "defender",    DefenderCompositeReward().get_weights()))
+blue_pool.add(AgentProfile("P_base", "positioning", PositioningCompositeReward().get_weights()))
+blue_policy  = default_policy_factory(blue_pool)   # replace with AC policy later
+hotswap_reward = HotswapRewardAdapter(HotswapManager(blue_pool, policy=blue_policy))
 
-# simple policy now; swap in your AC policy later
-blue_policy  = default_policy_factory(blue_pool)
-blue_manager = HotswapManager(blue_pool, policy=blue_policy)
-hotswap_reward = HotswapRewardAdapter(blue_manager)
+# separate obs builders
+ll_obs_builder = DefaultObs()
+ac_obs_builder = DefaultObs()
 
+# env
 env = EngineEnvAdapter(
-    engine,
+    engine=engine,
     action_parser=action_parser,
+    reward_function=hotswap_reward,
+    ll_obs_builder=ll_obs_builder,
+    ac_obs_builder=ac_obs_builder,
     action_mode="discrete",
-    obs_fn=build_observation_from_info,
-    reward_fn=None,
-    reward_function=hotswap_reward,   # <<— use hotswap here
 )
+
+# reset -> build PPO agents with correct input size
+first_obs, info = env.reset()
+agent_ids = list(env.state.cars.keys())
+obs_size_ll = first_obs.shape[0]
+ppo_agents = {aid: PPOAgent(obs_size=obs_size_ll, n_actions=N_ACTIONS) for aid in agent_ids}
+
+# --- one step smoke test ---
+# AC would pick profiles here (via policy internally), PPO picks actions per player using ll_obs
+actions_dict = {}
+for aid in agent_ids:
+    a, logp, val = ppo_agents[aid].act(info["ll_obs"][aid])
+    actions_dict[aid] = np.array([a], dtype=np.int64)
+
+obs1, reward_scalar, done, info = env.step(actions_dict)
+print("step ok; reward_sum=", reward_scalar, "done=", done)
