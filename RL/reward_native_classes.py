@@ -251,6 +251,59 @@ class MeanDistToOpponents(RewardFunction[AgentID, GameState, float]):
         return out
 
 
+class FaceGoal(RewardFunction[AgentID, GameState, float]):
+    """Cosine of car forward vs vector to OPPONENT goal (team-relative)."""
+    def __init__(self, weight: float = 1.0):
+        super().__init__(); self.weight = float(weight)
+    def reset(self, agents, initial_state, shared): pass
+    def get_rewards(self, agents, state, is_term, is_trunc, shared):
+        out = {}
+        for a in agents:
+            _, p, _, opp_goal, *_ = _rel(state, a)
+            to_goal = opp_goal - np.asarray(p.position, np.float32)
+            cos = float(np.dot(p.forward, to_goal) / (_safe_norm(p.forward) * _safe_norm(to_goal)))
+            out[a] = self.weight * cos
+        return out
+
+
+class HomeGoalProximity(RewardFunction[AgentID, GameState, float]):
+    """Negative distance from car to OWN goal (closer = better for anchoring defenders)."""
+    def __init__(self, weight: float = 1.0):
+        super().__init__(); self.weight = float(weight)
+    def reset(self, agents, initial_state, shared): pass
+    def get_rewards(self, agents, state, is_term, is_trunc, shared):
+        out = {}
+        for a in agents:
+            _, p, _, _, own_goal, _ = _rel(state, a)
+            d = np.linalg.norm(np.asarray(p.position, np.float32) - own_goal)
+            out[a] = self.weight * (-float(d))
+        return out
+
+
+class BehindOtherPlayers(RewardFunction[AgentID, GameState, float]):
+    """
+    Fraction of other cars that are 'ahead' of me relative to my OWN goal
+    (i.e., I am deeper/behind them for defense/rotation anchoring).
+    """
+    def __init__(self, weight: float = 1.0):
+        super().__init__(); self.weight = float(weight)
+    def reset(self, agents, initial_state, shared): pass
+    def get_rewards(self, agents, state, is_term, is_trunc, shared):
+        out = {}
+        for a in agents:
+            car, p, *_ = _rel(state, a)
+            own_goal = np.asarray(ORANGE_GOAL_BACK if car.team_num != ORANGE_TEAM else BLUE_GOAL_BACK, np.float32)
+            me_d = np.linalg.norm(np.asarray(p.position, np.float32) - own_goal)
+            others = []
+            for aid, c2 in state.cars.items():
+                if aid == a: continue
+                _, p2, *_ = _rel(state, aid)
+                others.append(np.linalg.norm(np.asarray(p2.position, np.float32) - own_goal))
+            frac = 0.0 if not others else float(sum(d < me_d for d in others)) / float(len(others))
+            out[a] = self.weight * frac
+        return out
+
+
 # ---------------- composites with mutable dicts ----------------
 class _CompositeBase(RewardFunction[AgentID, GameState, float]):
     DEFAULT_SIGMA = 0.10
@@ -316,6 +369,8 @@ class DefenderCompositeReward(_CompositeBase):
             'nearest_boost_inverse_distance': 0.20,
             'nearest_boost_availability': 0.10,
             'face_ball': 0.30,
+            'behind_other_players': 0.40,
+            'home_goal_proximity': 0.30,
             'goal': 8.0,
             'touch': 0.30,
         }
@@ -331,6 +386,8 @@ class DefenderCompositeReward(_CompositeBase):
             (NearestBoostInverseDistance(), w['nearest_boost_inverse_distance']),
             (NearestBoostAvailability(), w['nearest_boost_availability']),
             (FaceBall(), w['face_ball']),
+            (BehindOtherPlayers(), w['behind_other_players']),
+            (HomeGoalProximity(), w['home_goal_proximity']),
         ]
 
 
@@ -341,6 +398,8 @@ class PositioningCompositeReward(_CompositeBase):
             'mean_dist_to_opponents': 0.20,
             'centerline_proximity': 0.50,
             'face_ball': 0.40,
+            'face_goal': 0.40,
+            'car_speed': 0.05,
         }
     def parts(self, w: Dict[str, float]):
         return [
@@ -348,6 +407,8 @@ class PositioningCompositeReward(_CompositeBase):
             (MeanDistToOpponents(), w['mean_dist_to_opponents']),
             (CenterlineProximity(), w['centerline_proximity']),
             (FaceBall(), w['face_ball']),
+            (FaceGoal(), w['face_goal']),
+            (CarSpeed(), w['car_speed']),
         ]
 
 

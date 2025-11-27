@@ -1,13 +1,15 @@
 import numpy as np
+import csv, os
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import random
+from collections import deque
+from typing import Optional
 
 from rlgym.rocket_league.obs_builders import DefaultObs
 from rlgym.rocket_league.done_conditions.goal_condition import GoalCondition
-from rlgym.rocket_league.done_conditions.no_touch_condition import NoTouchTimeoutCondition
-from rlgym.rocket_league.action_parsers import DiscreteAction
+from rlgym.rocket_league.done_conditions.timeout_condition import TimeoutCondition
 from rlgym.rocket_league.state_mutators import FixedTeamSizeMutator, KickoffMutator, MutatorSequence
 
 from rlgym.rocket_league.common_values import ORANGE_TEAM, BLUE_GOAL_BACK, ORANGE_GOAL_BACK, BOOST_LOCATIONS
@@ -259,6 +261,15 @@ def build_info_from_state(state, agent_id):
     }
     return info
 
+def _safe_touches(car) -> int:
+    """Return a sane integer touch count even if backend leaves it None/str."""
+    val = getattr(car, "ball_touches", 0)
+    if val is None:
+        return 0
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return 0
 
 # ===============================
 # REWARD FEATURE FUNCTIONS (obs, info) -> float
@@ -292,21 +303,6 @@ def ball_dist_to_goal(obs, info):
     return -float(np.linalg.norm(ball_pos - goal_pos))
 
 
-def teammate_hit_ball(obs, info):
-    # If you later track last_toucher, replace this heuristic
-    return 0.0
-
-
-def opponent_bumped(obs, info):
-    # Placeholder; requires explicit event logging outside GameState
-    return 0.0
-
-
-def opponent_demolished(obs, info):
-    # Placeholder; requires explicit event logging outside GameState
-    return 0.0
-
-
 def mean_dist_to_teammates(obs, info):
     teammates = info.get('teammate_positions', [])
     car_pos = info.get('car_position', np.zeros(3))
@@ -330,7 +326,6 @@ def centerline_proximity(obs, info):
     car_pos = info.get('car_position', np.zeros(3))
     return -float(abs(car_pos[1]))
 
-# ---- NEW, useful micro-features ----
 
 def face_ball(obs, info):
     fwd = info.get('car_forward', np.zeros(3))
@@ -372,9 +367,36 @@ def nearest_boost_availability(obs, info):
 def supersonic_bonus(obs, info):
     return 1.0 if info.get('is_supersonic', False) else 0.0
 
+def face_goal(obs, info):
+    fwd = info.get('car_forward', np.zeros(3))
+    goal = info.get('goal_position', np.zeros(3))
+    me   = info.get('car_position', np.zeros(3))
+    to_goal = goal - me
+    return float(np.dot(fwd / _safe_norm(fwd), to_goal / _safe_norm(to_goal)))
+
+
+def home_goal_proximity(obs, info):
+    own = info.get('own_goal_position', np.zeros(3))
+    me  = info.get('car_position', np.zeros(3))
+    return -float(np.linalg.norm(me - own))
+
+
+def behind_other_players(obs, info):
+    """Count how many other cars are 'ahead' of me (closer to own goal -> I'm behind them)."""
+    own  = info.get('own_goal_position', np.zeros(3))
+    me   = info.get('car_position', np.zeros(3))
+    me_d = np.linalg.norm(me - own)
+    others = info.get('teammate_positions', []) + info.get('opponent_positions', [])
+    if not others:
+        return 0.0
+    cnt = sum(np.linalg.norm(np.asarray(p, np.float32) - own) < me_d for p in others)
+    # scale to [0,1] by num others
+    return float(cnt / max(1, len(others)))
+
+
 
 # ===============================
-# HIERARCHICAL CONTROLLER  (obs_size, n_actions, hyper=PPOHyper(), device="cpu") TODO
+# HIERARCHICAL CONTROLLER  (obs_size, n_actions, hyper=PPOHyper(), device="cpu")
 # ===============================
 class HierarchicalRLAgent:
     def __init__(self, obs_size, n_players, reward_categories, n_actions):
@@ -436,27 +458,49 @@ def build_observation_from_info(info):
 
 # --- Engine boot & adapter ----------------------------------------------------
 
-def initialize_engine_with_state(engine, initial_state=None):
+# old initialize_engine_with_state(...) -> replace with:
+
+def initialize_engine_with_state(engine, initial_state=None, blue_size=1, orange_size=1):
+    """
+    Create a fresh GameState and apply our mutators:
+      1) FixedTeamSizeMutator(blue_size, orange_size) - insert cars (expects empty state)
+      2) KickoffMutator() - standard ball+car kickoff positions/angles/boost
+    """
     gs = initial_state if initial_state is not None else engine.create_base_state()
-    engine.set_state(gs, shared_info={})
+
+    # Build and apply the sequence (order matters)
+    mutators = MutatorSequence(
+        FixedTeamSizeMutator(blue_size=blue_size, orange_size=orange_size),
+        KickoffMutator(),
+    )
+    shared = {}
+    mutators.apply(gs, shared)  # add cars, then set kickoff
+
+    engine.set_state(gs, shared)
     return engine, gs
 
 
+# ---- Next-touch bonus scaling (tunable) ----
+NEXT_TOUCH_BASE = 0.1     # base bonus
+NEXT_TOUCH_STEP = 0.05    # per-streak-step increment
+NEXT_TOUCH_CAP  = 0.25    # clamp to avoid runaway
+
+def _next_touch_bonus(streak: int) -> float:
+    # linear ramp: base + step*(streak-1), clamped
+    bonus = NEXT_TOUCH_BASE + NEXT_TOUCH_STEP * max(0, streak - 1)
+    return float(min(bonus, NEXT_TOUCH_CAP))
+
 class EngineEnvAdapter:
-    """
-    Discrete low-level control with hotswap rewards.
-    Exposes BOTH:
-      - ll_obs[agent_id]: low-level obs for PPO
-      - ac_obs: team-level obs for top AC (built via its own DefaultObs)
-    """
     def __init__(self,
                  engine,
                  action_parser,
                  reward_function,               # HotswapRewardAdapter (per-player rewards)
-                 ll_obs_builder: DefaultObs,    # low-level obs builder
-                 ac_obs_builder: DefaultObs,    # AC obs builder (separate instance)
+                 ll_obs_builder,                # use AdvancedObs()
+                 ac_obs_builder,                # use AdvancedObs() (can be pruned later)
                  action_mode="discrete",
-                 agent_selector=None):
+                 agent_selector=None,
+                 ac_adapter=None,
+                 blue_size=1, orange_size=1):              # <-- NEW: AC hook (HotswapACAdapter)
         self.engine = engine
         self.action_parser = action_parser
         self.action_mode = action_mode
@@ -464,58 +508,285 @@ class EngineEnvAdapter:
         self.ll_obs_builder = ll_obs_builder
         self.ac_obs_builder = ac_obs_builder
         self.agent_selector = agent_selector
+        self.ac_adapter = ac_adapter
+        self._blue_size = blue_size
+        self._orange_size = orange_size
+
+        # touch tracking
+        self._last_touches = {}   # AgentID -> int (car.ball_touches)
+        self._touch_buffer = deque(maxlen=getattr(ll_obs_builder, "touch_k", 8))
+        self._last_touch = {"aid": None, "team": None, "tick": -1}
+        self._await_next_team_touch = {}  # aid -> bool
+        self._team_touch_streak = {0: 0, 1: 0}  # {BLUE: count, ORANGE: count}
+
+
+    def _shared_info(self):
+        # share the same extras with both obs builders
+        return {"touch_buffer": list(self._touch_buffer)}
 
     def _build_ll_obs(self, state):
-        # build per-agent observations
         obs_map = {}
+        shared = self._shared_info()
         for aid in state.cars.keys():
-            obs_map[aid] = self.ll_obs_builder.build_obs(aid, state, shared_info={})
+            obs_map[aid] = self.ll_obs_builder._build_obs(aid, state, shared)  # use protected to pass shared
         return obs_map
 
     def _build_ac_obs(self, state):
-        # simplest path: build obs for each friendly agent and concatenate (or just use the first)
-        # Here we use the first agent's obs as AC observation placeholder; replace with your team encoding.
+        # You can build a real team-level tensor later; for now use the first agent's AdvancedObs
         aid0 = next(iter(state.cars.keys()))
-        return self.ac_obs_builder.build_obs(aid0, state, shared_info={})
+        return self.ac_obs_builder._build_obs(aid0, state, self._shared_info())
+    
+
+    def _update_touch_buffer(self, prev_state, state):
+        for aid, car in state.cars.items():
+            prev = self._last_touches.get(aid, 0)
+            cur = _safe_touches(car)
+            if cur > prev:
+                # team sign: blue +1, orange -1
+                sign = +1.0 if car.team_num != ORANGE_TEAM else -1.0
+                self._touch_buffer.append(sign)
+                # mark who touched now
+                self._last_touch = {"aid": aid, "team": car.team_num, "tick": int(state.tick_count)}
+                # update team streaks
+                t_team = car.team_num  # 0 blue, 1 orange
+                prev_team = self._last_touch.get("team", None)
+                if prev_team is None or prev_team == t_team:
+                    # same-team consecutive touch -> grow this team’s streak
+                    self._team_touch_streak[t_team] = self._team_touch_streak.get(t_team, 0) + 1
+                else:
+                    # opponent touched -> reset our streak to 1 and their streak to 0
+                    self._team_touch_streak[t_team] = 1
+                    self._team_touch_streak[1 - t_team] = 0
+                # the toucher is now awaiting the *next* team touch bonus
+                self._await_next_team_touch[aid] = True
+            self._last_touches[aid] = cur
+
+    def _compute_role_bonuses(self, state, manager, await_map):
+        """
+        Returns {aid: bonus} based on current profile role:
+        - striker/defender/positioning: 'next team touch' bonus after this agent's last hit
+        - defender: + behind_other_players + home_goal_proximity
+        - positioning: + face_goal, + car_speed (already exists), + extra on 'teammate->agent' touch chain
+        """
+        bonuses = {aid: 0.0 for aid in state.cars.keys()}
+        if manager is None or not hasattr(manager, "current_name"):
+            return bonuses
+
+        # detect if a new touch happened this step and by which team/aid
+        # (env already updated _last_touch before calling this)
+        # we'll use info dicts to evaluate features
+        for aid in state.cars.keys():
+            info = build_info_from_state(state, aid)
+
+            role_name = manager.current_name.get(aid, "").lower()
+            # --- defender spatial helpers
+            if role_name == "defender":
+                bonuses[aid] += behind_other_players(None, info)
+                bonuses[aid] += 0.1 * home_goal_proximity(None, info)
+
+            # --- positioning helpers
+            if role_name == "positioning":
+                bonuses[aid] += 0.1 * face_goal(None, info)
+                bonuses[aid] += 0.02 * car_speed(None, info)  # gentle speed term
+
+        return bonuses
 
     def reset(self, initial_state=None):
-        _, state = initialize_engine_with_state(self.engine, initial_state=initial_state)
-        # reset reward function with current agents
+        _, state = initialize_engine_with_state(self.engine, initial_state=initial_state, blue_size=self._blue_size, orange_size=self._orange_size)
+        self.state = state
+        self._last_touches = {aid: _safe_touches(c) for aid, c in state.cars.items()}
+        self._touch_buffer.clear()
+        self._team_touch_streak = {0: 0, 1: 0}
+        self._await_next_team_touch = {aid: False for aid in state.cars.keys()}
+        self._last_touch = {"aid": None, "team": None, "tick": -1}
+
+
         agent_ids = list(state.cars.keys())
         self.reward_function.reset(agent_ids, state, {})
         ll_obs = self._build_ll_obs(state)
         ac_obs = self._build_ac_obs(state)
-        # Gym-like reset returns something — we’ll return the first agent’s LL obs,
-        # but stash both in info for training code.
         first_obs = ll_obs[agent_ids[0]]
         info = {"ll_obs": ll_obs, "ac_obs": ac_obs}
         return first_obs, info
 
     def step(self, actions_dict, shared_info=None):
-        # actions_dict: {AgentID: np.array([discrete_id])}
         prev_state = self.engine.state
         controls_map = self.action_parser.parse_actions(actions_dict, prev_state, shared_info or {})
         state = self.engine.step(controls_map, shared_info or {})
+        self.state = state
+
+        # AC-driven profile selection (hotswap) BEFORE reward calc
+        if self.ac_adapter is not None and hasattr(self.reward_function, "hotswap"):
+            team_agents = list(state.cars.keys())
+            team_is_orange = any(state.cars[aid].team_num == ORANGE_TEAM for aid in team_agents)
+            self.ac_adapter.decide_and_update(self.reward_function.hotswap, state, team_agents, team_is_orange)
+
+        # update touch buffer off new state
+        self._update_touch_buffer(prev_state, state)
+
+        # role-aware bonuses (spatial/angle/speed)
+        mgr = getattr(self.reward_function, "hotswap", None)
+        bonuses = self._compute_role_bonuses(state, mgr, self._await_next_team_touch)
+
+        # team next-touch bonuses:
+        lt = getattr(self, "_last_touch", None) or {}
+        if lt["aid"] is not None:
+            t_aid = lt["aid"]
+            t_team = lt["team"]
+            # 1) if any agent was awaiting a next *team* touch and this touch's team matches -> bonus
+            for aid in list(self._await_next_team_touch.keys()):
+                if self._await_next_team_touch.get(aid, False):
+                    if state.cars[aid].team_num == t_team:
+                        # add a team next-touch bonus (works for striker/defender/positioning), modest weight
+                        bonuses[aid] = bonuses.get(aid, 0.0) + 0.5
+                        self._await_next_team_touch[aid] = False
 
         agent_ids = list(state.cars.keys())
         # rewards via hotswap composites (per-agent)
         rmap = self.reward_function.get_rewards(agent_ids, state, {aid: False for aid in agent_ids},
                                                 {aid: False for aid in agent_ids}, shared_info or {})
-        # observations
+
+        # --- next-touch streak bonus (to the current toucher only) ---
+        toucher = lt.get("aid", None)
+        team    = lt.get("team", None)
+        if toucher is not None and team in (0, 1):
+            streak = int(self._team_touch_streak.get(team, 0))
+            rmap[toucher] = float(rmap.get(toucher, 0.0)) + _next_touch_bonus(streak)
+
+        # add role-specific bonuses
+        for aid in agent_ids:
+            rmap[aid] = float(rmap[aid]) + float(bonuses.get(aid, 0.0))
+
         ll_obs = self._build_ll_obs(state)
         ac_obs = self._build_ac_obs(state)
-        # termination heuristic
         done = bool(getattr(state, "goal_scored", False))
-        # Return first agent’s obs in obs slot; everything else in info
+
         first_obs = ll_obs[agent_ids[0]]
-        info = {"ll_obs": ll_obs, "ac_obs": ac_obs, "rewards": rmap}
-        # reward: sum or first — for compatibility, return sum; training can use info['rewards'] per agent
+        info = {"ll_obs": ll_obs, "ac_obs": ac_obs, "rewards": rmap, "touch_buffer": list(self._touch_buffer)}
         reward_scalar = float(sum(rmap.values()))
         return first_obs, reward_scalar, done, info
 
 
+class MatchRunner:
+    """
+    Runs a continuous 5-minute match:
+      - Ends only on TimeoutCondition(300s) (not on goals)
+      - On goal: applies KickoffMutator and continues
+      - Logs per-tick state & current profile assignment for review
+    """
+    def __init__(self, env, ppo_agents, kickoffs: Optional[KickoffMutator] = None):
+        self.env = env
+        self.ppo_agents = ppo_agents
+        self.kickoffs = kickoffs or KickoffMutator()
+        self.timer = TimeoutCondition(timeout_seconds=300.0)  # 5 minutes  :contentReference[oaicite:8]{index=8}
+        self.scores = {"BLUE": 0, "ORANGE": 0}
+        self._initialized = False
+
+    def _score_and_reset_kickoff(self, state):
+        # naive team guess from goal_scored flag + ball y; adapt if your engine exposes scorer
+        ball_y = state.ball.position[1]
+        if ball_y > 0:   # ball ended in ORANGE half -> BLUE scored
+            self.scores["BLUE"] += 1
+        else:
+            self.scores["ORANGE"] += 1
+        # re-apply a kickoff without touching the timer
+        gs = state
+        seq = MutatorSequence(self.kickoffs)
+        seq.apply(gs, shared_info={})
+        self.env.engine.set_state(gs, shared_info={})
+        # also clear touch buffer in the env if present
+        if hasattr(self.env, "_touch_buffer"):
+            self.env._touch_buffer.clear()
+
+    def _log_row(self, state, profiles_by_agent):
+        row = {
+            "tick": int(state.tick_count),
+            "time_s": float(state.tick_count) / 120.0,  # TICKS_PER_SECOND
+            "ball_x": float(state.ball.position[0]),
+            "ball_y": float(state.ball.position[1]),
+            "ball_z": float(state.ball.position[2]),
+            "ball_vx": float(state.ball.linear_velocity[0]),
+            "ball_vy": float(state.ball.linear_velocity[1]),
+            "ball_vz": float(state.ball.linear_velocity[2]),
+            "score_blue": self.scores["BLUE"],
+            "score_orange": self.scores["ORANGE"],
+        }
+        # append each car
+        lt = getattr(self.env, "_last_touch", {"aid": None, "team": None, "tick": -1})
+        row["last_touch_aid"]  = "" if lt.get("aid") is None else str(lt["aid"])
+        row["last_touch_team"] = -1 if lt.get("team") is None else int(lt["team"])
+        row["last_touch_tick"] = int(lt.get("tick", -1))
+        # cars...
+        for aid, car in state.cars.items():
+            p = car.physics
+            row.update({
+                f"{aid}_team": int(car.team_num),
+                f"{aid}_x": float(p.position[0]),   f"{aid}_y": float(p.position[1]),   f"{aid}_z": float(p.position[2]),
+                f"{aid}_vx": float(p.linear_velocity[0]), f"{aid}_vy": float(p.linear_velocity[1]), f"{aid}_vz": float(p.linear_velocity[2]),
+                f"{aid}_boost": float(getattr(car, "boost_amount", 0.0)),
+                f"{aid}_profile": profiles_by_agent.get(aid, ""),
+            })
+        row["touch_streak_blue"]   = int(getattr(self.env, "_team_touch_streak", {}).get(0, 0))
+        row["touch_streak_orange"] = int(getattr(self.env, "_team_touch_streak", {}).get(1, 0))
+        row["last_touch_bonus"]    = float(_next_touch_bonus(row["touch_streak_blue"] if row["last_touch_team"] == 0
+            else row["touch_streak_orange"]) if row["last_touch_team"] in (0,1) else 0.0)
+        return row
+
+    def run(self, log_path="match_log.csv"):
+        # reset env + timer
+        first_obs, info = self.env.reset()
+        agent_ids = list(self.env.state.cars.keys())
+        self.timer.reset(agent_ids, self.env.state, shared_info={})
+        self._initialized = True
+
+        # open CSV
+        fieldnames = None
+        os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+        f = open(log_path, "w", newline="")
+        writer = None
+
+        try:
+            while True:
+                # PPO picks low-level actions per agent
+                actions = {}
+                for aid in agent_ids:
+                    a, logp, v = self.ppo_agents[aid].act(info["ll_obs"][aid])
+                    actions[aid] = np.array([a], dtype=np.int64)
+
+                # step sim (AC hotswap happens inside env.step)
+                obs, reward_sum, done, info = self.env.step(actions)
+
+                # read current profile names (if available) for logging
+                profiles = {}
+                mgr = getattr(self.env.reward_function, "hotswap", None)
+                if mgr is not None and hasattr(mgr, "current_name"):
+                    profiles = dict(mgr.current_name)
+
+                # log frame
+                row = self._log_row(self.env.state, profiles)
+                if writer is None:
+                    fieldnames = list(row.keys())
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                writer.writerow(row)
+
+                # timeout condition to end match
+                dones = self.timer.is_done(agent_ids, self.env.state, shared_info={})  # 5-min gate  :contentReference[oaicite:9]{index=9}
+                if any(dones.values()):
+                    break
+
+                # goal handling: restart kickoff, continue same match/time window
+                if getattr(self.env.state, "goal_scored", False):
+                    self._score_and_reset_kickoff(self.env.state)
+
+        finally:
+            f.close()
+
+        return {"scores": dict(self.scores), "log_path": log_path}
+
+
 # ===============================
-# Example reward feature sets
+# Reward feature sets
 # ===============================
 striker_rewards = {
     'dist_to_ball': dist_to_ball,
@@ -526,6 +797,7 @@ striker_rewards = {
     'face_ball': face_ball,
     'shot_alignment': shot_alignment,
     'supersonic_bonus': supersonic_bonus,
+    'next_team_touch': lambda obs, info: 0.0,
 }
 
 defender_rewards = {
@@ -533,44 +805,68 @@ defender_rewards = {
     'boost_remaining': boost_remaining,
     'ball_hit': ball_hit,
     'behind_ball_defensive': behind_ball_defensive,
-    # behind_other_players (teammates/opponents distances)
     'centerline_proximity': centerline_proximity,
-    # home_goal_proximity
     'nearest_boost_inverse_distance': nearest_boost_inverse_distance,
     'nearest_boost_availability': nearest_boost_availability,
     'face_ball': face_ball,
+    'next_team_touch': lambda obs, info: 0.0,
+    'behind_other_players': behind_other_players,
+    'home_goal_proximity': home_goal_proximity,
 }
 
 positioning_rewards = {
+    'dist_to_ball': dist_to_ball,
+    'boost_remaining': boost_remaining,
     'mean_dist_to_teammates': mean_dist_to_teammates,
     'mean_dist_to_opponents': mean_dist_to_opponents,
     'centerline_proximity': centerline_proximity,
     'face_ball': face_ball,
-    # face_goal
+    'face_goal': face_goal,
+    'car_speed': car_speed,
+    'next_team_touch': lambda obs, info: 0.0,
 }
 
-from hotswap_hrl import AgentProfile, TeamProfilePool, HotswapManager, HotswapRewardAdapter, default_policy_factory
+from hotswap_hrl import AgentProfile, TeamProfilePool, HotswapManager, HotswapRewardAdapter, default_policy_factory, ACProfilePolicy, ACConfig, HotswapACAdapter
 from reward_native_classes import StrikerCompositeReward, DefenderCompositeReward, PositioningCompositeReward
 from rlgym.rocket_league.sim import RocketSimEngine
+from AdvancedObs import AdvancedObs
 # engine + action parser
 engine = RocketSimEngine(rlbot_delay=True)
 N_ACTIONS = 90
 action_parser = RepeatAction(LookupTableAction(), repeats=8)
 
 # profile pools / hotswap
+# blue_pool = TeamProfilePool()
+# blue_pool.add(AgentProfile("S_base", "striker",     StrikerCompositeReward().get_weights()))
+# blue_pool.add(AgentProfile("S_agro", "striker",     {**StrikerCompositeReward().get_weights(), "shot_alignment": 1.2, "goal": 12.0}))
+# blue_pool.add(AgentProfile("D_base", "defender",    DefenderCompositeReward().get_weights()))
+# blue_pool.add(AgentProfile("P_base", "positioning", PositioningCompositeReward().get_weights()))
+# blue_policy  = default_policy_factory(blue_pool)   # replace with AC policy later
+# hotswap_reward = HotswapRewardAdapter(HotswapManager(blue_pool, policy=blue_policy))
+
+# separate obs builders
+ll_obs_builder = AdvancedObs()
+ac_obs_builder = AdvancedObs()
+
+# Build profile name list for AC
 blue_pool = TeamProfilePool()
 blue_pool.add(AgentProfile("S_base", "striker",     StrikerCompositeReward().get_weights()))
 blue_pool.add(AgentProfile("S_agro", "striker",     {**StrikerCompositeReward().get_weights(), "shot_alignment": 1.2, "goal": 12.0}))
 blue_pool.add(AgentProfile("D_base", "defender",    DefenderCompositeReward().get_weights()))
 blue_pool.add(AgentProfile("P_base", "positioning", PositioningCompositeReward().get_weights()))
-blue_policy  = default_policy_factory(blue_pool)   # replace with AC policy later
-hotswap_reward = HotswapRewardAdapter(HotswapManager(blue_pool, policy=blue_policy))
+# -- manager WITHOUT a policy (AC will drive swaps) --
+hotswap_mgr = HotswapManager(blue_pool, policy=None)
+hotswap_reward = HotswapRewardAdapter(hotswap_mgr)
 
-# separate obs builders
-ll_obs_builder = DefaultObs()
-ac_obs_builder = DefaultObs()
+# -- AC profile policy over all profile names --
+profile_names = list({*blue_pool.names_for_role("striker"),
+                      *blue_pool.names_for_role("defender"),
+                      *blue_pool.names_for_role("positioning")})
+ac_policy  = ACProfilePolicy(ac_obs_builder=ac_obs_builder, profile_names=profile_names,
+                             cfg=ACConfig(switch_penalty_base=0.5, switch_decay_seconds=25.0))
+ac_adapter = HotswapACAdapter(ac_policy)
 
-# env
+# -- env that runs AC swaps *inside* step(), then computes rewards from current composites --
 env = EngineEnvAdapter(
     engine=engine,
     action_parser=action_parser,
@@ -578,7 +874,10 @@ env = EngineEnvAdapter(
     ll_obs_builder=ll_obs_builder,
     ac_obs_builder=ac_obs_builder,
     action_mode="discrete",
+    ac_adapter=ac_adapter,
+    blue_size=2, orange_size=2,
 )
+
 
 # reset -> build PPO agents with correct input size
 first_obs, info = env.reset()
@@ -588,10 +887,16 @@ ppo_agents = {aid: PPOAgent(obs_size=obs_size_ll, n_actions=N_ACTIONS) for aid i
 
 # --- one step smoke test ---
 # AC would pick profiles here (via policy internally), PPO picks actions per player using ll_obs
-actions_dict = {}
-for aid in agent_ids:
-    a, logp, val = ppo_agents[aid].act(info["ll_obs"][aid])
-    actions_dict[aid] = np.array([a], dtype=np.int64)
+# actions = {}
+# for aid in agent_ids:
+#     a, logp, val = ppo_agents[aid].act(info["ll_obs"][aid])
+#     actions[aid] = np.array([a], dtype=np.int64)
 
-obs1, reward_scalar, done, info = env.step(actions_dict)
-print("step ok; reward_sum=", reward_scalar, "done=", done)
+# obs1, reward_sum, done, info = env.step(actions)
+# print("step ok; reward_sum=", reward_sum, "done=", done)
+
+
+# Run one full match and save CSV
+runner = MatchRunner(env, ppo_agents, kickoffs=KickoffMutator())
+result = runner.run(log_path="out/match_log.csv")
+print("Match finished:", result)
