@@ -21,30 +21,6 @@ base_parser   = LookupTableAction()
 action_parser = RepeatAction(base_parser, repeats=8)  # adjust repeats for your tick_skip
 
 # ===============================
-# HRL TEAM AGENT
-# ===============================
-class TeamActorCritic(nn.Module):
-    def __init__(self, obs_size, n_categories, hidden_dim=256):
-        super().__init__()
-        self.actor = nn.Sequential(
-            nn.Linear(obs_size, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, n_categories),
-            nn.Softmax(dim=-1),
-        )
-        self.critic = nn.Sequential(
-            nn.Linear(obs_size, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, obs):
-        probs = self.actor(obs)
-        value = self.critic(obs)
-        return probs, value
-
-
-# ===============================
 # PPO for low-level agents
 # ===============================
 import math
@@ -394,38 +370,6 @@ def behind_other_players(obs, info):
     return float(cnt / max(1, len(others)))
 
 
-
-# ===============================
-# HIERARCHICAL CONTROLLER  (obs_size, n_actions, hyper=PPOHyper(), device="cpu")
-# ===============================
-class HierarchicalRLAgent:
-    def __init__(self, obs_size, n_players, reward_categories, n_actions):
-        self.n_categories = len(reward_categories)
-        self.team_controller = TeamActorCritic(obs_size, self.n_categories)
-        self.behaviors = [
-            [PPOAgent(obs_size, n_actions, reward_features=wset) for wset in category]
-            for category in reward_categories
-        ]
-        self.n_players = n_players
-        self.optimizer = optim.Adam(self.team_controller.parameters(), lr=3e-4)
-
-    def assign_category(self, team_obs):
-        probs, _ = self.team_controller(team_obs)
-        category_indices = torch.multinomial(probs, num_samples=self.n_players, replacement=True)
-        return category_indices.tolist()
-
-    def act(self, player_obs_list, team_obs):
-        assigned = self.assign_category(team_obs)
-        actions = []
-        for i, obs in enumerate(player_obs_list):
-            category_idx = assigned[i]
-            behavior = random.choice(self.behaviors[category_idx])
-            # NOTE: placeholder — assumes obs already mapped to a discrete index
-            state_idx = int(obs) if np.isscalar(obs) else 0
-            actions.append(behavior.select_action(state_idx))
-        return actions
-
-
 # ===============================
 # RLGym Environment Integration (with InfoInjector)
 # ===============================
@@ -681,6 +625,10 @@ class MatchRunner:
         self.timer = TimeoutCondition(timeout_seconds=300.0)  # 5 minutes  :contentReference[oaicite:8]{index=8}
         self.scores = {"BLUE": 0, "ORANGE": 0}
         self._initialized = False
+        # episode logging
+        self._last_tick = 0
+        self._profile_playtime_ticks: dict[str, int] = {}
+        self._total_playtime_ticks: int = 0
 
     def _score_and_reset_kickoff(self, state):
         # naive team guess from goal_scored flag + ball y; adapt if your engine exposes scorer
@@ -770,6 +718,23 @@ class MatchRunner:
                     writer.writeheader()
                 writer.writerow(row)
 
+                # accumulate profile playtime (per profile name) ---
+                current_tick = int(self.env.state.tick_count)
+                if self._total_playtime_ticks == 0:
+                    # first step of match
+                    self._last_tick = current_tick
+                dt_ticks = max(0, current_tick - self._last_tick)
+                self._last_tick = current_tick
+                if dt_ticks > 0 and profiles:
+                    self._total_playtime_ticks += dt_ticks
+                    for _, prof_name in profiles.items():
+                        if not prof_name:
+                            continue
+                        self._profile_playtime_ticks[prof_name] = (
+                            self._profile_playtime_ticks.get(prof_name, 0) + dt_ticks
+                        )
+
+
                 # timeout condition to end match
                 dones = self.timer.is_done(agent_ids, self.env.state, shared_info={})  # 5-min gate  :contentReference[oaicite:9]{index=9}
                 if any(dones.values()):
@@ -782,7 +747,27 @@ class MatchRunner:
         finally:
             f.close()
 
-        return {"scores": dict(self.scores), "log_path": log_path}
+        # --- Episode-level outcome for AC and profiles ---
+        goal_diff = float(self.scores["BLUE"] - self.scores["ORANGE"])
+        total_ticks = max(1, self._total_playtime_ticks)
+
+        # Per-profile episode rewards scaled by playtime fraction and goal differential
+        profile_rewards = {
+            name: goal_diff * (ticks / total_ticks)
+            for name, ticks in self._profile_playtime_ticks.items()
+        }
+
+        # High-level AC reward for this match (can be fed into AC training)
+        ac_episode_reward = goal_diff  # blue-positive
+
+        return {
+            "scores": dict(self.scores),
+            "log_path": log_path,
+            "goal_diff": goal_diff,
+            "ac_reward": ac_episode_reward,
+            "profile_playtime_ticks": dict(self._profile_playtime_ticks),
+            "profile_rewards": profile_rewards,
+        }
 
 
 # ===============================
@@ -846,7 +831,7 @@ action_parser = RepeatAction(LookupTableAction(), repeats=8)
 
 # separate obs builders
 ll_obs_builder = AdvancedObs()
-ac_obs_builder = AdvancedObs()
+ac_obs_builder = AdvancedObs() # TODO: not used
 
 # Build profile name list for AC
 blue_pool = TeamProfilePool()

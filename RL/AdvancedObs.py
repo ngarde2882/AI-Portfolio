@@ -18,6 +18,8 @@ class AdvancedObs(DefaultObs):
       - extra partially observable vars per-agent:
           car.boost_active_time (float), car.supersonic_time (float),
           car.wheels_with_contact (4 bools -> ints)
+      - aerial rotation data for self + ball:
+          self.angular_velocity[3], self.euler_angles[3], ball.angular_velocity[3]
     The adapter supplies 'touch_buffer' via shared_info.
     """
     def __init__(self, grid_bins=(4, 6), x_max=4096.0, y_max=5120.0, touch_k=8, **kwargs):
@@ -60,8 +62,32 @@ class AdvancedObs(DefaultObs):
         bat = float(getattr(car, "boost_active_time", 0.0))
         sst = float(getattr(car, "supersonic_time", 0.0))
         w = getattr(car, "wheels_with_contact", (False, False, False, False))
-        wheels = np.array([int(bool(x)) for x in (w if isinstance(w, (list, tuple)) else (False, False, False, False))], dtype=np.float32)
+        wheels = np.array(
+            [int(bool(x)) for x in (w if isinstance(w, (list, tuple)) else (False, False, False, False))],
+            dtype=np.float32
+        )
         return np.concatenate([np.array([bat, sst], dtype=np.float32), wheels])
+
+    def _rot_features(self, agent: AgentID, state: GameState) -> np.ndarray:
+        """
+        Aerial rotation features in team-relative frame:
+          - self.angular_velocity[3]
+          - self.euler_angles[3]  (pitch, yaw, roll)
+          - ball.angular_velocity[3]
+        """
+        car = state.cars[agent]
+        inverted = (car.team_num == ORANGE_TEAM)
+
+        # self physics in team frame
+        phys = car.inverted_physics if inverted else car.physics
+        ang_self = np.asarray(phys.angular_velocity, dtype=np.float32)  # [3]
+        euler = np.asarray(phys.euler_angles, dtype=np.float32)         # [3] (pitch, yaw, roll)
+
+        # ball physics in same frame
+        ball = state.inverted_ball if inverted else state.ball
+        ang_ball = np.asarray(ball.angular_velocity, dtype=np.float32)  # [3]
+
+        return np.concatenate([ang_self, euler, ang_ball], dtype=np.float32)  # [9]
 
     def _build_obs(self, agent: AgentID, state: GameState, shared_info: Dict[str, Any]) -> np.ndarray:
         base = super()._build_obs(agent, state, shared_info)  # DefaultObs vector
@@ -74,11 +100,15 @@ class AdvancedObs(DefaultObs):
             tb = list(tb) + [0.0] * (self.touch_k - len(tb))
         tb = np.asarray(tb[: self.touch_k], dtype=np.float32)
 
-        extra = self._extra_po(car)
-        return np.concatenate([base, grid, tb, extra], dtype=np.float32)
+        po_extra = self._extra_po(car)
+        rot_extra = self._rot_features(agent, state)
+
+        return np.concatenate([base, grid, tb, po_extra, rot_extra], dtype=np.float32)
 
     def get_obs_space(self, agent: AgentID) -> tuple[str, int]:
         kind, base_n = super().get_obs_space(agent)
         C, W, H = 3, self.grid_bins[0], self.grid_bins[1]
-        extra = (C * W * H) + self.touch_k + 6  # bat,sst + 4 wheels
+        # po_extra: 6 (bat, sst, 4 wheels)
+        # rot_extra: 9 (ang_self[3], euler[3], ang_ball[3])
+        extra = (C * W * H) + self.touch_k + 15
         return kind, base_n + extra
