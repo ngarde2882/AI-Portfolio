@@ -288,7 +288,7 @@ class ACConfig:
 
 
 class ACProfilePolicy:
-    """Actor-Critic over profile names with decaying switch penalty (lazy init).
+    """Actor-Critic over profile names with decaying switch penalty.
 
     Now uses a single team-level observation vector for all agents, composed of:
       - Ball state: [ball_xyz, ball_vel_xyz, ball_speed]
@@ -296,9 +296,8 @@ class ACProfilePolicy:
       - Opponent threat: [nearest_dist, opp_speeds[3], opp_aligns[3]]
       - Event features (ACEventFeatures): [dv, ddir, half, speed, x_var, y_var]
     """
-    def __init__(self, ac_obs_builder: DefaultObs, profile_names: List[str],
+    def __init__(self, profile_names: List[str],
                  cfg: ACConfig = ACConfig(), device: str = "cpu"):
-        self.ac_obs_builder = ac_obs_builder  # kept for compatibility/logging, not used in obs
         self.profile_names  = list(profile_names)
         self.name_to_idx    = {n: i for i, n in enumerate(self.profile_names)}
         self.cfg            = cfg
@@ -460,7 +459,7 @@ class ACProfilePolicy:
         # keep net/opt alive across episodes
 
     @torch.no_grad()
-    def act(self, state: GameState, team_agents: List[Any], team_is_orange: bool) -> Dict[Any, str]:
+    def act(self, state: GameState, team_agents: List[Any]) -> Dict[Any, str]:
         """
         Decide profile for each agent given the current GameState.
         `team_is_orange` is ignored for building obs; we infer the controlled team from the first agent.
@@ -525,22 +524,21 @@ class ACProfilePolicy:
 class HotswapACAdapter:
     """Adapter that lets a team use ACProfilePolicy as the hotswap policy.
 
-    Call `decide_and_update(manager, state, team_agents, team_is_orange)` each step.
+    Call `decide_and_update(manager, state, team_agents)` each step (pass only agents on that team).
     """
     def __init__(self, policy: ACProfilePolicy):
         self.policy = policy
 
-    def decide_and_update(self, manager, state: GameState, team_agents: List[Any], team_is_orange: bool):
-        choices = self.policy.act(state, team_agents, team_is_orange)
+    def decide_and_update(self, manager, state: GameState, team_agents: List[Any]):
+        choices = self.policy.act(state, team_agents)
         for aid, name in choices.items():
             if manager.current_name.get(aid) != name:
                 manager.set_profile(aid, state, name)   # <- use setter
         return choices
 
 
-
 # ----------------------------------------------------------------------------
-# Glue: step-time reward with hotswapping
+# step-time reward with hotswapping
 # ----------------------------------------------------------------------------
 class HotswapRewardAdapter:
     """
@@ -563,3 +561,42 @@ class HotswapRewardAdapter:
         shared_info: Dict[str, Any]
     ) -> Dict[AgentID, float]:
         return self.hotswap.get_rewards(agents, state)
+
+
+# Assignment-driven reward adapter: per-AgentID composite based on assigned player profile
+
+class AssignedProfileRewardAdapter(RewardFunction):
+    def __init__(self, global_profiles: Dict[str, Any]):
+        """
+        global_profiles: {"s1": AgentProfile(...), ...}
+        """
+        self.global_profiles = global_profiles
+        self._assigned_player: Dict[AgentID, str] = {}
+        self._rf_by_agent: Dict[AgentID, RewardFunction] = {}
+
+    def set_assignments(self, assigned_player: Dict[AgentID, str]) -> None:
+        self._assigned_player = dict(assigned_player)
+
+    def reset(self, agents: List[AgentID], initial_state: GameState, shared_info: Dict[str, Any]) -> None:
+        self._rf_by_agent.clear()
+        for aid in agents:
+            pname = self._assigned_player[aid]
+            prof = self.global_profiles[pname]          # AgentProfile
+            comp = prof.build_composite()               # _CompositeBase (RewardFunction)
+            comp.reset([aid], initial_state, shared_info)
+            self._rf_by_agent[aid] = comp
+
+    def get_rewards(
+        self,
+        agents: List[AgentID],
+        state: GameState,
+        is_terminated: Dict[AgentID, bool],
+        is_truncated: Dict[AgentID, bool],
+        shared_info: Dict[str, Any]
+    ) -> Dict[AgentID, float]:
+        out = {}
+        for aid in agents:
+            rfun = self._rf_by_agent[aid]
+            rmap = rfun.get_rewards([aid], state, is_terminated, is_truncated, shared_info)
+            out[aid] = float(rmap[aid])
+        return out
