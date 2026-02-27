@@ -1,7 +1,35 @@
 
 import os, csv
+import traceback
 from collections import deque
 from dataclasses import dataclass
+
+# =============================================================================
+# Debug instrumentation
+# =============================================================================
+
+@dataclass
+class DebugConfig:
+    enabled: bool = False
+    log_path: str = "out/debug_env.log"
+    # Print warnings when agents appear "stuck" (low speed + repeated same action)
+    warn_stuck_agents: bool = True
+    stuck_speed_uu_per_s: float = 25.0          # below this, treat as not moving
+    stuck_action_window: int = 64               # number of decisions to consider "stuck"
+    stuck_same_action_frac: float = 0.95        # if >= this fraction are same action -> stuck
+
+    # Validate observation vectors (NaNs/inf/near-constant)
+    validate_obs: bool = True
+    obs_nan_inf_warn: bool = True
+    obs_low_variance_warn: bool = True
+    obs_low_variance_eps: float = 1e-8
+
+    # Reward sanity checks
+    reward_nan_inf_warn: bool = True
+
+    # Print cadence
+    print_every_ticks: int = 480                # ~4 seconds at 120 Hz
+
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -15,6 +43,7 @@ from rlgym.rocket_league.action_parsers import LookupTableAction, RepeatAction
 from rlgym.rocket_league.common_values import ORANGE_TEAM, TICKS_PER_SECOND
 from rlgym.rocket_league.done_conditions.timeout_condition import TimeoutCondition
 from rlgym.rocket_league.state_mutators import FixedTeamSizeMutator, KickoffMutator, MutatorSequence
+from rlgym.rocket_league.sim import RocketSimEngine
 
 from hotswap_hrl import (
     AgentProfile,
@@ -27,7 +56,6 @@ from hotswap_hrl import (
 
 # Your local modules
 from reward_native_classes import StrikerCompositeReward, DefenderCompositeReward, PositioningCompositeReward
-from rlgym.rocket_league.sim import RocketSimEngine
 from AdvancedObs import AdvancedObs
 
 
@@ -215,6 +243,8 @@ class TwoTeamAssignedHotswapRewardAdapter(RewardFunction):
         # initial assignments are pushed by env.reset()
         self._assigned_player: Dict[AgentID, str] = {}
 
+        self.last_breakdown_by_aid: Dict[AgentID, Dict[str, float]] = {}
+
         self._build_pools()
 
     def _build_pools(self):
@@ -243,6 +273,7 @@ class TwoTeamAssignedHotswapRewardAdapter(RewardFunction):
 
     def reset(self, agents: List[AgentID], initial_state: GameState, shared_info: Dict[str, Any]) -> None:
         self.current_name.clear()
+        self.last_breakdown_by_aid.clear()
         for team_id in (0, 1):
             self.mgr_by_team[team_id].current.clear()
             self.mgr_by_team[team_id].current_name.clear()
@@ -268,6 +299,13 @@ class TwoTeamAssignedHotswapRewardAdapter(RewardFunction):
             comp = self.mgr_by_team[team].current[aid]
             rmap = comp.get_rewards([aid], state, is_terminated, is_truncated, shared_info)
             out[aid] = float(rmap[aid])
+
+            bd = {}
+            try:
+                bd = comp.get_last_breakdown(aid)
+            except Exception:
+                bd = {}
+            self.last_breakdown_by_aid[aid] = bd
         return out
 
 
@@ -302,6 +340,10 @@ class EngineEnvAdapter:
         global_profiles: Optional[Dict[str, AgentProfile]] = None,
         ac_adapter_blue: Optional[HotswapACAdapter] = None,
         ac_adapter_orange: Optional[HotswapACAdapter] = None,
+        debug: Optional[DebugConfig] = None,
+        cost_of_living_per_tick: float = 0.0,
+        reward_scale: float = 1.0,
+        goal_anneal_cap: float = 400.0,
     ):
         self.engine = engine
         self.action_parser = action_parser
@@ -319,8 +361,27 @@ class EngineEnvAdapter:
         self.ac_blue = ac_adapter_blue
         self.ac_orange = ac_adapter_orange
 
+        self.debug = debug or DebugConfig(enabled=False)
+        self.cost_of_living_per_tick = float(cost_of_living_per_tick)
+        self.reward_scale = float(reward_scale)
+        # Goal component of reward is capped at ±goal_anneal_cap after scaling so that
+        # sparse terminal events don't overwhelm dense shaping at high annealing scales.
+        # At scale=1.0 (end of annealing) goal*1=10 < cap, so the cap is transparent.
+        self.goal_anneal_cap = float(goal_anneal_cap)
+
+        # debug logging to file (avoid interfering with tqdm)
+        self._dbg_fh = None
+        if self.debug.enabled and getattr(self.debug, "log_path", None):
+            os.makedirs(os.path.dirname(self.debug.log_path) or ".", exist_ok=True)
+            self._dbg_fh = open(self.debug.log_path, "a", buffering=1)
+        self._dbg_last_print_bucket = None
+        self._dbg_action_hist = { }
+
+        # action history buffer for observations (always-on)
+        self._action_hist = {}
+        self._action_hist_k = int(getattr(ll_obs_builder, 'action_hist_k', 8))
+
         self.player_by_agent: Dict[AgentID, str] = {}
-        self.role_by_agent: Dict[AgentID, str] = {}
 
         self._last_touches: Dict[AgentID, int] = {}
         self._touch_buffer = deque(maxlen=getattr(ll_obs_builder, "touch_k", 8))
@@ -330,17 +391,93 @@ class EngineEnvAdapter:
     def _shared_info(self):
         return {
             "touch_buffer": list(self._touch_buffer),
+            "action_hist_by_agent": {aid: list(hist) for aid, hist in self._action_hist.items()},
             "last_touch": dict(self._last_touch),
             "team_touch_streak": dict(self._team_touch_streak),
             "profile_by_agent": dict(self.player_by_agent),
-            "role_by_agent": dict(self.role_by_agent),
+            "profile_names": list(self.global_profiles.keys()),
         }
+
+    def __del__(self):
+        try:
+            if getattr(self, "_dbg_fh", None) is not None:
+                self._dbg_fh.close()
+        except Exception:
+            pass
+
+
+    # ---------------------------- debug helpers ----------------------------
+
+    def _dbg_log(self, msg: str) -> None:
+        if not (getattr(self, "debug", None) and self.debug.enabled):
+            return
+        try:
+            line = str(msg).rstrip()
+            if self._dbg_fh is not None:
+                self._dbg_fh.write(line + "\n")
+        except Exception:
+            pass
+
+    def _dbg_note_actions(self, actions_idx: Dict[AgentID, int]) -> None:
+        if not getattr(self, "debug", DebugConfig()).enabled:
+            return
+        for aid, a in actions_idx.items():
+            h = self._dbg_action_hist.setdefault(aid, deque(maxlen=max(8, int(self.debug.stuck_action_window))))
+            h.append(int(a))
+
+    def _dbg_check_obs(self, aid: AgentID, obs: np.ndarray) -> None:
+        dbg = getattr(self, "debug", None)
+        if not (dbg and dbg.enabled and dbg.validate_obs):
+            return
+        if obs is None:
+            return
+        arr = np.asarray(obs, dtype=np.float32)
+        if dbg.obs_nan_inf_warn and (not np.isfinite(arr).all()):
+            n_bad = int(np.size(arr) - np.isfinite(arr).sum())
+            self._dbg_log(f"[DBG][obs] aid={aid} nonfinite={n_bad}/{arr.size}")
+        if dbg.obs_low_variance_warn:
+            v = float(np.var(arr))
+            if v <= float(dbg.obs_low_variance_eps):
+                mn = float(np.min(arr)); mx = float(np.max(arr))
+                self._dbg_log(f"[DBG][obs] aid={aid} low-variance var={v:.3e} min={mn:.3e} max={mx:.3e}")
+
+    def _dbg_warn_stuck(self, state: GameState, actions_idx: Dict[AgentID, int]) -> None:
+        dbg = getattr(self, "debug", None)
+        if not (dbg and dbg.enabled and dbg.warn_stuck_agents):
+            return
+
+        # throttle printing by tick buckets
+        tick = int(getattr(state, "tick_count", 0))
+        bucket = tick // max(1, int(dbg.print_every_ticks))
+        if self._dbg_last_print_bucket is not None and bucket == self._dbg_last_print_bucket:
+            return
+        self._dbg_last_print_bucket = bucket
+
+        for aid, car in state.cars.items():
+            phys = car.physics
+            speed = float(np.linalg.norm(np.asarray(phys.linear_velocity, dtype=np.float32)))
+            if speed > float(dbg.stuck_speed_uu_per_s):
+                continue
+
+            h = self._dbg_action_hist.get(aid)
+            if not h or len(h) < max(8, int(dbg.stuck_action_window) // 2):
+                continue
+
+            # fraction of most-common action in window
+            vals, counts = np.unique(np.asarray(h, dtype=np.int64), return_counts=True)
+            frac = float(np.max(counts)) / float(len(h))
+            if frac >= float(dbg.stuck_same_action_frac):
+                a_mode = int(vals[int(np.argmax(counts))])
+                pname = self.player_by_agent.get(aid, "?")
+                self._dbg_log(f"[DBG][stuck] tick={tick} aid={aid} profile={pname} speed={speed:.1f} action_mode={a_mode} frac={frac:.2f} window={len(h)}")
 
     def _build_ll_obs(self, state: GameState):
         obs_map = {}
         shared = self._shared_info()
         for aid in state.cars.keys():
-            obs_map[aid] = self.ll_obs_builder._build_obs(aid, state, shared)
+            obs = self.ll_obs_builder._build_obs(aid, state, shared)
+            obs_map[aid] = obs
+            self._dbg_check_obs(aid, obs)
         return obs_map
 
     def _assign_players_for_match(self, state: GameState):
@@ -351,17 +488,14 @@ class EngineEnvAdapter:
         orange_aids = sorted([aid for aid, car in state.cars.items() if int(car.team_num) == 1])
 
         self.player_by_agent.clear()
-        self.role_by_agent.clear()
 
         for i, aid in enumerate(blue_aids):
             pname = blue_list[i % len(blue_list)]
             self.player_by_agent[aid] = pname
-            self.role_by_agent[aid] = self.global_profiles[pname].role
 
         for i, aid in enumerate(orange_aids):
             pname = orange_list[i % len(orange_list)]
             self.player_by_agent[aid] = pname
-            self.role_by_agent[aid] = self.global_profiles[pname].role
 
     def _update_touch_tracking(self, state: GameState):
         for aid, car in state.cars.items():
@@ -383,7 +517,6 @@ class EngineEnvAdapter:
 
     def _refresh_deployments_from_reward_adapter(self):
         self.player_by_agent = dict(self.reward_function.current_name)
-        self.role_by_agent = {aid: self.global_profiles[p].role for aid, p in self.player_by_agent.items()}
 
     def reset(self, initial_state=None):
         _, state = initialize_engine_with_state(
@@ -399,10 +532,32 @@ class EngineEnvAdapter:
         self._last_touch = {"aid": None, "team": None, "tick": -1}
         self._last_touches = {aid: _safe_touches(c) for aid, c in state.cars.items()}
 
+
+        # reset per-car action history
+        self._action_hist = {aid: deque([0.0]*self._action_hist_k, maxlen=self._action_hist_k) for aid in state.cars.keys()}
+
         self._assign_players_for_match(state)
         self.reward_function.set_assignments(self.player_by_agent)
         agent_ids = list(state.cars.keys())
         self.reward_function.reset(agent_ids, state, self._shared_info())
+        self._refresh_deployments_from_reward_adapter()
+
+        # Let AC managers choose initial deployments at tick=0 (before first obs)
+        agent_ids = list(state.cars.keys())
+        try:
+            if self.ac_blue is not None:
+                blue_aids = [aid for aid in agent_ids if int(state.cars[aid].team_num) == 0]
+                if blue_aids:
+                    self.ac_blue.decide_and_update(self.reward_function, state, blue_aids)
+            if self.ac_orange is not None:
+                orange_aids = [aid for aid in agent_ids if int(state.cars[aid].team_num) == 1]
+                if orange_aids:
+                    self.ac_orange.decide_and_update(self.reward_function, state, orange_aids)
+        except Exception:
+            self._dbg_log("[ERR][ac_init] exception during tick=0 deployment decision")
+            self._dbg_log(traceback.format_exc().rstrip())
+            raise
+
         self._refresh_deployments_from_reward_adapter()
 
         ll_obs = self._build_ll_obs(state)
@@ -410,7 +565,7 @@ class EngineEnvAdapter:
         info = {
             "ll_obs": ll_obs,
             "profile_by_agent": dict(self.player_by_agent),
-            "role_by_agent": dict(self.role_by_agent),
+            "profile_names": list(self.global_profiles.keys()),
         }
         return first_obs, info
 
@@ -422,6 +577,20 @@ class EngineEnvAdapter:
 
         agent_ids = list(state.cars.keys())
 
+        # Debug: record chosen low-level actions (if provided)
+        if shared_info and isinstance(shared_info, dict) and 'actions_idx' in shared_info:
+            try:
+                self._dbg_note_actions(shared_info['actions_idx'])
+            except Exception:
+                pass
+
+            try:
+                for aid, aidx in shared_info['actions_idx'].items():
+                    hist = self._action_hist.setdefault(aid, deque(maxlen=self._action_hist_k))
+                    # normalize discrete action index to [0,1] for obs compactness
+                    hist.append(float(int(aidx)) / 89.0)
+            except Exception:
+                pass
         if self.ac_blue is not None:
             blue_aids = [aid for aid in agent_ids if int(state.cars[aid].team_num) == 0]
             if blue_aids:
@@ -435,9 +604,50 @@ class EngineEnvAdapter:
         self._refresh_deployments_from_reward_adapter()
         self._update_touch_tracking(state)
 
+        # Debug: warn on apparent stuck policies
+        try:
+            self._dbg_warn_stuck(state, (shared_info or {}).get('actions_idx', {}))
+        except Exception:
+            pass
+
         is_term = {aid: False for aid in agent_ids}
         is_trunc = {aid: False for aid in agent_ids}
         rmap = self.reward_function.get_rewards(agent_ids, state, is_term, is_trunc, self._shared_info())
+        # Pull per-agent breakdown from reward function (weighted, pre-COL, pre-scale)
+        breakdown_by_aid = {}
+        try:
+            breakdown_by_aid = {aid: dict(self.reward_function.last_breakdown_by_aid.get(aid, {})) for aid in agent_ids}
+        except Exception:
+            breakdown_by_aid = {aid: {} for aid in agent_ids}
+
+        # Flat per-tick cost of living to discourage idle policies (set via cost_of_living_per_tick)
+        if self.cost_of_living_per_tick != 0.0:
+            col = float(self.cost_of_living_per_tick)
+            for _aid in agent_ids:
+                rmap[_aid] = float(rmap.get(_aid, 0.0)) - col
+                breakdown_by_aid[_aid]["cost_of_living"] = breakdown_by_aid[_aid].get("cost_of_living", 0.0) - col
+
+        # Reward annealing scale (driven by gauntlet; 1.0 means no scaling).
+        # Dense shaping components are scaled freely; the 'goal' component is
+        # additionally capped at ±goal_anneal_cap so terminal events don't
+        # dominate the value function before agents can reliably reach the ball.
+        sc = float(self.reward_scale)
+        cap = float(self.goal_anneal_cap)
+        if sc != 1.0 or True:  # always recompute total from breakdown to stay consistent
+            for _aid in agent_ids:
+                bd = breakdown_by_aid.get(_aid, {})
+                new_total = 0.0
+                for k in list(bd.keys()):
+                    raw = float(bd[k])
+                    scaled = raw * sc
+                    if k == "goal":
+                        # Clamp goal contribution so it can't exceed ±cap during annealing.
+                        # When scale=1 and goal=10, 10 < 400, so the cap is invisible.
+                        scaled = float(np.clip(scaled, -cap, cap))
+                    bd[k] = scaled
+                    new_total += scaled
+                breakdown_by_aid[_aid] = bd
+                rmap[_aid] = new_total
 
         ll_obs = self._build_ll_obs(state)
         done = bool(state.goal_scored)
@@ -447,18 +657,15 @@ class EngineEnvAdapter:
             "ll_obs": ll_obs,
             "rewards": rmap,
             "profile_by_agent": dict(self.player_by_agent),
-            "role_by_agent": dict(self.role_by_agent),
+            "profile_names": list(self.global_profiles.keys()),
             "touch_buffer": list(self._touch_buffer),
             "last_touch": dict(self._last_touch),
             "touch_streaks": dict(self._team_touch_streak),
+            "reward_breakdown": breakdown_by_aid,
+            "reward_scale": float(self.reward_scale),
         }
         reward_scalar = float(sum(rmap.values()))
         return first_obs, reward_scalar, done, info
-
-
-# =============================================================================
-# MatchRunner (two teams): uses deployed profiles to pick actions + store per-profile rollouts
-# =============================================================================
 
 
 # =============================================================================
@@ -551,7 +758,6 @@ except Exception:
     _LOOKUP_TABLE = getattr(_tmp, "_lookup_table", None)
     if _LOOKUP_TABLE is None:
         raise RuntimeError("Could not obtain lookup table for action decoding.")
-
 
 
 class HighLevelMatchLogger:
@@ -753,6 +959,83 @@ class HighLevelMatchLogger:
         except Exception:
             pass
 
+class RewardContributionLogger:
+    """
+    One row per match:
+      match_id, (blue_sum, orange_sum) for each reward component AFTER annealing multiplier.
+    Also includes postgame contribution outcome reward (fixed +/-10; not annealed).
+    """
+    def __init__(self, path: str, reward_keys: List[str]):
+        self.path = path
+        self.reward_keys = list(reward_keys)
+
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        is_new = (not os.path.exists(path)) or (os.path.getsize(path) == 0)
+
+        self._f = open(path, "a", newline="")
+        self._writer = csv.DictWriter(self._f, fieldnames=self._fieldnames())
+        if is_new:
+            self._writer.writeheader()
+
+    def _fieldnames(self) -> List[str]:
+        cols = [
+            "match_id",
+            "blue_team",
+            "orange_team",
+            "reward_scale",
+            "blue_score",
+            "orange_score",
+            "goal_diff",
+            "postgame_contrib_goal_diff",
+            "ac_reward_blue",
+            "ac_reward_orange",
+        ]
+        cols += [f"r_{k}" for k in self.reward_keys]
+        return cols
+
+    def log_match(
+        self,
+        *,
+        match_id: int,
+        blue_team: str,
+        orange_team: str,
+        reward_scale: float,
+        blue_score: int,
+        orange_score: int,
+        ac_reward_blue: float,
+        ac_reward_orange: float,
+        team_sums_blue: Dict[str, float],
+        team_sums_orange: Dict[str, float],
+    ) -> None:
+        goal_diff = int(blue_score - orange_score)
+
+        row: Dict[str, Any] = {
+            "match_id": int(match_id),
+            "blue_team": str(blue_team),
+            "orange_team": str(orange_team),
+            "reward_scale": float(reward_scale),
+            "blue_score": int(blue_score),
+            "orange_score": int(orange_score),
+            "goal_diff": goal_diff,
+            # team-total postgame contribution outcome reward (fixed +/-10)
+            "postgame_contrib_goal_diff": f"({(10.0 if goal_diff>0 else (-10.0 if goal_diff<0 else 0.0)):.6f},{(-10.0 if goal_diff>0 else (10.0 if goal_diff<0 else 0.0)):.6f})",
+            "ac_reward_blue": float(ac_reward_blue),
+            "ac_reward_orange": float(ac_reward_orange),
+        }
+
+        for k in self.reward_keys:
+            b = float(team_sums_blue.get(k, 0.0))
+            o = float(team_sums_orange.get(k, 0.0))
+            row[f"r_{k}"] = f"({b:.6f},{o:.6f})"
+
+        self._writer.writerow(row)
+        self._f.flush()
+
+    def close(self) -> None:
+        try:
+            self._f.close()
+        except Exception:
+            pass
 
 # =============================================================================
 # MatchRunner (two teams): uses deployed profiles to pick actions + store per-profile rollouts
@@ -790,9 +1073,14 @@ class MatchRunner:
         high_dir: Optional[str] = None,
         sample_every_ticks: int = 16,
         high_logger: Optional[HighLevelMatchLogger] = None,
+        reward_logger: Optional[RewardContributionLogger] = None,
     ):
         # Reset match-level tracking
         self.scores = {"BLUE": 0, "ORANGE": 0}
+        # Reward tracking
+        team_reward_sums = {0: {}, 1: {}}
+        ac_reward_blue = 0.0
+        ac_reward_orange = 0.0
 
         _, info = self.env.reset()
         agent_ids = list(self.env.state.cars.keys())
@@ -813,6 +1101,8 @@ class MatchRunner:
 
         # per-team deployment tick totals per profile
         dep_ticks = {0: {}, 1: {}}
+        # per-agent deployment ticks (for postgame contribution reward)
+        dep_ticks_agent: Dict[AgentID, float] = {aid: 0.0 for aid in agent_ids}
 
         # initial sample at tick 0
         if high_logger is not None: high_logger.maybe_sample(self.env.state, info.get("profile_by_agent", {}), self.scores, force=True)
@@ -841,17 +1131,28 @@ class MatchRunner:
                 self._prev_val[aid] = v
 
             # step env
-            _, _, done, info = self.env.step(actions)
+            _, _, done, info = self.env.step(actions, shared_info={'actions_idx': actions_idx})
 
             state_after = self.env.state
             tick_after = int(state_after.tick_count)
             dticks = max(1, tick_after - tick_before)
+
+            # Reward tracking
+            rb = info.get("reward_breakdown", {})
+            for aid in agent_ids:
+                team = int(state_after.cars[aid].team_num)
+                bd = rb.get(aid, {})
+                if not isinstance(bd, dict):
+                    continue
+                for k, v in bd.items():
+                    team_reward_sums[team][k] = float(team_reward_sums[team].get(k, 0.0)) + float(v)
 
             # account deployment time for the interval [before, after)
             for aid in agent_ids:
                 team = int(state_before.cars[aid].team_num)
                 pname = prev_profiles.get(aid, "")
                 dep_ticks[team][pname] = float(dep_ticks[team].get(pname, 0.0)) + float(dticks)
+                dep_ticks_agent[aid] = float(dep_ticks_agent.get(aid, 0.0)) + float(dticks)
 
             # detect switches (between prev_profiles and current)
             cur_profiles = dict(info["profile_by_agent"])
@@ -862,17 +1163,47 @@ class MatchRunner:
                     switches_team[team] += 1
                     per_agent_switches[aid] = per_agent_switches.get(aid, 0) + 1
 
-            # store PPO transitions using reward from this step
-            rmap = info["rewards"]
+                        # termination checks (need to know if this is the last transition before storing)
+            dones = self.timer.is_done(agent_ids, state_after, shared_info={})
+            done_flag = bool(any(dones.values()))
+
+            # store PPO transitions using reward from this step (optionally with postgame bonus on terminal step)
+            rmap = dict(info["rewards"])
+
+            if done_flag:
+                # Postgame contribution reward:
+                # - Fixed +/-10 team total based on win/loss (independent of goal_diff magnitude).
+                # - Distributed across *agents* proportional to their deployment time in this match.
+                gd = int(self.scores["BLUE"] - self.scores["ORANGE"])
+                if gd != 0:
+                    outcome = 1.0 if gd > 0 else -1.0  # +1 => BLUE win, -1 => ORANGE win
+                    postgame_total = 10.0
+                    blue_total = outcome * postgame_total
+                    orange_total = -blue_total
+
+                    team_ticks = {0: 0.0, 1: 0.0}
+                    for _aid in agent_ids:
+                        t = int(state_after.cars[_aid].team_num)
+                        team_ticks[t] += float(dep_ticks_agent.get(_aid, 0.0))
+
+                    for _aid in agent_ids:
+                        t = int(state_after.cars[_aid].team_num)
+                        denom = float(team_ticks.get(t, 0.0))
+                        if denom <= 0.0:
+                            continue
+                        frac = float(dep_ticks_agent.get(_aid, 0.0)) / denom
+                        bonus = (blue_total if t == 0 else orange_total) * frac
+                        rmap[_aid] = float(rmap.get(_aid, 0.0)) + float(bonus)
+
             for aid in agent_ids:
                 pname_prev = prev_profiles[aid]
                 self.ppo_players[pname_prev].store(
                     self._prev_obs[aid],
                     int(actions[aid][0]),
                     float(self._prev_logp[aid]),
-                    float(rmap[aid]),
+                    float(rmap.get(aid, 0.0)),
                     float(self._prev_val[aid]),
-                    bool(done),
+                    bool(done_flag),
                 )
 
             # update any buffers that filled
@@ -886,10 +1217,7 @@ class MatchRunner:
                 if per_agent_switches:
                     high_logger.note_switches(per_agent_switches)
                 high_logger.maybe_sample(state_after, cur_profiles, self.scores, force=False)
-
-            # termination checks
-            dones = self.timer.is_done(agent_ids, state_after, shared_info={})
-            if any(dones.values()):
+            if done_flag:
                 break
 
             if state_after.goal_scored:
@@ -899,6 +1227,30 @@ class MatchRunner:
                 if high_logger is not None:
                     high_logger.maybe_sample(self.env.engine.state, cur_profiles, self.scores, force=True)
 
+
+        
+        # ---------------- High-level AC outcome reward ----------------
+        # Very simple win/loss signal so managers learn the purpose of the game.
+        # Note: magnitude intentionally small; low-level PPO remains the primary learner early on.
+        # BLUE AC outcome
+        if hasattr(self.env, "ac_blue") and self.env.ac_blue is not None:
+            if self.scores["BLUE"] > self.scores["ORANGE"]:
+                ac_reward_blue = +1.0
+            elif self.scores["BLUE"] < self.scores["ORANGE"]:
+                ac_reward_blue = -1.0
+            else:
+                ac_reward_blue = 0.0
+            self.env.ac_blue.finalize_match(ac_reward_blue)
+
+        # ORANGE AC outcome
+        if hasattr(self.env, "ac_orange") and self.env.ac_orange is not None:
+            if self.scores["ORANGE"] > self.scores["BLUE"]:
+                ac_reward_orange = +1.0
+            elif self.scores["ORANGE"] < self.scores["BLUE"]:
+                ac_reward_orange = -1.0
+            else:
+                ac_reward_orange = 0.0
+            self.env.ac_orange.finalize_match(ac_reward_orange)
 
         # finalize high log
         if high_logger is not None:
@@ -928,6 +1280,20 @@ class MatchRunner:
                 contrib_blue=contrib_blue,
                 contrib_orange=contrib_orange,
             )
+        
+        if reward_logger is not None:
+            reward_logger.log_match(
+                match_id=match_id,
+                blue_team=self.env.blue_team_name,
+                orange_team=self.env.orange_team_name,
+                reward_scale=float(getattr(self.env, "reward_scale", 1.0)),
+                blue_score=int(self.scores["BLUE"]),
+                orange_score=int(self.scores["ORANGE"]),
+                ac_reward_blue=float(ac_reward_blue),
+                ac_reward_orange=float(ac_reward_orange),
+                team_sums_blue=dict(team_reward_sums[0]),
+                team_sums_orange=dict(team_reward_sums[1]),
+            )
 
         return {
             "match_id": match_id,
@@ -952,17 +1318,17 @@ def build_globals():
     GLOBAL_PROFILES = {
         "s0": AgentProfile("s0", "striker", dict(S_base)),
         "s1": AgentProfile("s1", "striker", dict(S_base)),
-        "s2": AgentProfile("s2", "striker", tweak(S_base, dist_to_ball=0.0, car_speed=0.0, boost_remaining=1.0e-5, supersonic_bonus=0.0, ball_dist_to_goal=2.0e-5, face_ball=1.0e-5, shot_alignment=6.0e-5, ball_hit=3.0e-2, touch=2.5e-2)),
-        "s3": AgentProfile("s3", "striker", tweak(S_base, dist_to_ball=1.5e-5, car_speed=2.0e-5, boost_remaining=0.0, supersonic_bonus=1.5e-5, ball_dist_to_goal=2.0e-5, face_ball=2.0e-5, shot_alignment=7.0e-5, ball_hit=2.0e-2, touch=1.5e-2, goal=12.0)),
-        "s4": AgentProfile("s4", "striker", tweak(S_base, dist_to_ball=1.0e-5, car_speed=0.0, boost_remaining=1.0e-5, supersonic_bonus=0.0, ball_dist_to_goal=1.5e-5, face_ball=2.0e-5, shot_alignment=6.0e-5, ball_hit=3.0e-2, touch=1.0e-2)),
-        "s5": AgentProfile("s5", "striker", tweak(S_base, dist_to_ball=2.0e-5, car_speed=1.0e-5, boost_remaining=0.0, supersonic_bonus=0.0, ball_dist_to_goal=2.0e-5, face_ball=2.0e-5, shot_alignment=7.0e-5, ball_hit=4.0e-2, touch=2.0e-2, goal=12.0)),
+        "s2": AgentProfile("s2", "striker", tweak(S_base, dist_to_ball=0.0, car_speed=1.0e-5, ball_dist_to_goal=2.0e-5, face_ball=1.0e-5, shot_alignment=6.0e-5, ball_hit=3.0e-2, touch=2.5e-2)),
+        "s3": AgentProfile("s3", "striker", tweak(S_base, dist_to_ball=1.5e-5, car_speed=2.0e-5, ball_dist_to_goal=2.0e-5, face_ball=2.0e-5, shot_alignment=7.0e-5, ball_hit=2.0e-2, touch=1.5e-2, goal=12.0)),
+        "s4": AgentProfile("s4", "striker", tweak(S_base, dist_to_ball=1.0e-5, car_speed=1.0e-5, ball_dist_to_goal=1.5e-5, face_ball=2.0e-5, shot_alignment=6.0e-5, ball_hit=3.0e-2, touch=1.0e-2)),
+        "s5": AgentProfile("s5", "striker", tweak(S_base, dist_to_ball=2.0e-5, car_speed=1.0e-5, ball_dist_to_goal=2.0e-5, face_ball=2.0e-5, shot_alignment=7.0e-5, ball_hit=4.0e-2, touch=2.0e-2, goal=12.0)),
         "p1": AgentProfile("p1", "positioning", dict(P_base)),
-        "p2": AgentProfile("p2", "positioning", tweak(P_base, car_speed=0.0, boost_remaining=2.0e-5, mean_dist_to_teammates=2.0e-5, mean_dist_to_opponents=0.0, centerline_proximity=1.0e-5, face_ball=7.5e-5, face_goal=2.5e-5, shot_alignment=5.0e-5, block_alignment=7.5e-5, def_hit=2.0e-2)),
-        "p3": AgentProfile("p3", "positioning", tweak(P_base, car_speed=0.5e-5, boost_remaining=2.0e-5, mean_dist_to_teammates=1.0e-5, mean_dist_to_opponents=1.0e-5, centerline_proximity=0.0, face_ball=5.0e-5, face_goal=7.5e-5, shot_alignment=7.5e-5, block_alignment=5.0e-5, def_hit=2.0e-2)),
+        "p2": AgentProfile("p2", "positioning", tweak(P_base, car_speed=1.5e-5, mean_dist_to_teammates=2.0e-5, centerline_proximity=1.0e-5, face_ball=7.5e-5, shot_alignment=5.0e-5, block_alignment=7.5e-5, def_hit=2.0e-2, ball_hit=1.0e-2)),
+        "p3": AgentProfile("p3", "positioning", tweak(P_base, car_speed=1.5e-5, mean_dist_to_teammates=1.0e-5, centerline_proximity=0.0, face_ball=5.0e-5, shot_alignment=7.5e-5, block_alignment=5.0e-5, def_hit=2.0e-2, ball_hit=2.0e-2)),
         "d1": AgentProfile("d1", "defender", dict(D_base)),
-        "d2": AgentProfile("d2", "defender", tweak(D_base, boost_remaining=0.5e-5, dist_to_ball=0.0, centerline_proximity=0.5e-5, home_goal_proximity=2.0e-5, face_ball=5.0e-5, block_alignment=7.5e-5, behind_other_players=7.5e-5, def_hit=5.0e-2, touch=0.0)),
-        "d3": AgentProfile("d3", "defender", tweak(D_base, boost_remaining=1.0e-5, dist_to_ball=0.0, centerline_proximity=1.0e-5, home_goal_proximity=2.0e-5, face_ball=5.0e-5, block_alignment=7.5e-5, behind_other_players=3.0e-5, def_hit=5.0e-2, touch=2.0e-2, goal=15.0)),
-        "d4": AgentProfile("d4", "defender", tweak(D_base, boost_remaining=1.0e-5, dist_to_ball=1.0e-5, centerline_proximity=5.0e-5, home_goal_proximity=5.0e-5, face_ball=5.0e-5, block_alignment=3.0e-5, behind_other_players=2.0e-5, def_hit=7.5e-2, touch=3.0e-2, goal=15.0)),
+        "d2": AgentProfile("d2", "defender", tweak(D_base, dist_to_ball=0.0, centerline_proximity=0.5e-5, home_goal_proximity=2.0e-5, face_ball=5.0e-5, block_alignment=7.5e-5, behind_other_players=1.5e-5, def_hit=5.0e-2, touch=0.0)),
+        "d3": AgentProfile("d3", "defender", tweak(D_base, dist_to_ball=0.0, centerline_proximity=1.0e-5, home_goal_proximity=2.0e-5, face_ball=5.0e-5, block_alignment=7.5e-5, behind_other_players=3.0e-5, def_hit=5.0e-2, touch=2.0e-2, goal=15.0)),
+        "d4": AgentProfile("d4", "defender", tweak(D_base, dist_to_ball=1.0e-5, centerline_proximity=5.0e-5, home_goal_proximity=5.0e-5, face_ball=5.0e-5, block_alignment=3.0e-5, behind_other_players=2.0e-5, def_hit=7.5e-2, touch=3.0e-2, goal=15.0)),
     }
 
     TEAM_SPECS = {

@@ -11,13 +11,14 @@ This project is an early-stage reinforcement learning agent designed to play Roc
 ## Current Progress
 
 - Environment setup with RLGym
-- Initial PPO training loop scaffolded
-- Experimentation with replay parsing and feature extraction
-
-## Planned Work (Fall 2025)
-
-- Refine training pipeline and curriculum
-- Implement replay-based offline learning
-- Develop teammate-compatible behavior models
-
-> *Development is temporarily paused due to hardware limitations. Occasional code refactoring and planning may continue during summer 2025.*
+- HRL agents composed (and saved during training)
+- Detailed and tiered reward composition
+- Match logging
+- Stage 1 training: gauntlets
+    We run every team matchup for a set number of matches to gain full-length episode training
+    This step generates low-level logs of basic match info
+- Stage 2 validation: tournaments
+    We create 2 brackets of our teams that play a series of matches until the winner of both brackets play
+    This step generates high-level logs for (planned) visualization and real break-downs of matches
+- Stage 3 training (planned): state-similarity
+    We collect high-level logs to find patterns in player formations and game situations for intense replaying in one-goal matches

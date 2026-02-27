@@ -6,8 +6,9 @@ import numpy as np
 from rlgym.api import RewardFunction, AgentID
 from rlgym.rocket_league.api import GameState
 
-from rlgym.rocket_league.reward_functions import CombinedReward, GoalReward, TouchReward
-from rlgym.rocket_league.common_values import BOOST_LOCATIONS, BLUE_GOAL_BACK, ORANGE_GOAL_BACK, ORANGE_TEAM
+from rlgym.rocket_league.reward_functions import GoalReward, TouchReward
+from rlgym.rocket_league.common_values import BOOST_LOCATIONS, BLUE_GOAL_BACK, ORANGE_GOAL_BACK, ORANGE_TEAM, BALL_MAX_SPEED
+from combined_reward import CombinedReward, LoggedCombinedReward
 
 
 # ----------------------- normalization constants -----------------------
@@ -26,9 +27,14 @@ MAX_ARENA_DIST = float(np.linalg.norm(np.array([
 ], dtype=np.float32)))
 
 MAX_CAR_SPEED  = 2300.0   # uu/s (supersonic cap)
-MAX_BALL_SPEED = 6000.0   # uu/s (hard-ish cap; actual may exceed slightly in edge cases)
+# BALL_MAX_SPEED imported from common_values (~6000 uu/s hard cap)
+# BallHit/DefHit normalize against 3/4 of that so realistic hard shots saturate the signal
+BALL_HIT_SPEED_NORM = BALL_MAX_SPEED * 0.75
 MAX_BOOST      = 100.0    # 0..100
 MAX_BOOST_PAD_COOLDOWN = 10.0  # seconds (large pad respawn ~10s; small pads are smaller)
+
+# Standard Rocket League goal is ~1786 uu wide; half-width used for post targets
+GOAL_HALF_WIDTH = 893.0
 
 
 # ----------------------- helpers -----------------------
@@ -146,7 +152,7 @@ class BallHit(RewardFunction[AgentID, GameState, float]):
         own goal yields negative reward naturally.
       - Vertical ball motion does not directly affect the direction term.
     """
-    def __init__(self, weight: float = 1.0, window_ticks: int = 120):
+    def __init__(self, weight: float = 1.0, window_ticks: int = 60):
         super().__init__()
         self.weight = float(weight)
         self.window_ticks = int(window_ticks)
@@ -187,7 +193,7 @@ class BallHit(RewardFunction[AgentID, GameState, float]):
                 out[a] = 0.0
                 continue
 
-            # Active tick: compute goal-directed horizontal velocity alignment
+            # Active tick: compute best alignment across goal center and near posts
             _, _, b, opp_goal, *_ = _rel(state, a)
 
             ball_vel = np.asarray(b.linear_velocity, dtype=np.float32)
@@ -196,18 +202,25 @@ class BallHit(RewardFunction[AgentID, GameState, float]):
             if v_xy_n < 1e-6:
                 signal = 0.0
             else:
-                ball_pos = np.asarray(b.position, dtype=np.float32)
-                goal_pos = np.asarray(opp_goal, dtype=np.float32)
-                dir_xy = (goal_pos - ball_pos)[:2]
-                dir_n = float(np.linalg.norm(dir_xy))
-                if dir_n < 1e-6:
-                    signal = 0.0
-                else:
-                    v_hat = v_xy / v_xy_n
-                    d_hat = dir_xy / dir_n
-                    align = float(np.clip(np.dot(v_hat, d_hat), -1.0, 1.0))
-                    speed_n = float(_norm_speed(v_xy_n, MAX_BALL_SPEED))
-                    signal = align * speed_n  # [-1,1]
+                ball_pos_xy = np.asarray(b.position, dtype=np.float32)[:2]
+                goal_center = np.asarray(opp_goal, dtype=np.float32)[:2]
+                # Left and right goal posts in team-relative frame (X is lateral, same for both teams)
+                left_post  = goal_center.copy(); left_post[0]  -= GOAL_HALF_WIDTH
+                right_post = goal_center.copy(); right_post[0] += GOAL_HALF_WIDTH
+
+                v_hat = v_xy / v_xy_n
+                speed_n = float(_norm_speed(v_xy_n, BALL_HIT_SPEED_NORM))
+
+                def _target_align(tgt: np.ndarray) -> float:
+                    d = tgt - ball_pos_xy
+                    dn = float(np.linalg.norm(d))
+                    if dn < 1e-6:
+                        return 0.0
+                    return float(np.clip(np.dot(v_hat, d / dn), -1.0, 1.0))
+
+                # Best on-frame target wins; shots past the posts get lower alignment naturally
+                align = max(_target_align(goal_center), _target_align(left_post), _target_align(right_post))
+                signal = align * speed_n  # [-1, 1]
 
             out[a] = self.weight * (signal * inv_window)
 
@@ -227,7 +240,7 @@ class DefHit(RewardFunction[AgentID, GameState, float]):
     This is intended for defender composites to encourage clears and to discourage
     touches that drive the ball toward your own net. Vertical component is ignored.
     """
-    def __init__(self, weight: float = 1.0, window_ticks: int = 120):
+    def __init__(self, weight: float = 1.0, window_ticks: int = 60):
         super().__init__()
         self.weight = float(weight)
         self.window_ticks = int(window_ticks)
@@ -279,7 +292,7 @@ class DefHit(RewardFunction[AgentID, GameState, float]):
             else:
                 ball_pos = np.asarray(b.position, dtype=np.float32)
                 own_pos = np.asarray(own_goal, dtype=np.float32)
-                away_xy = (ball_pos - own_pos)[:2]  # direction away from own goal
+                away_xy = (ball_pos - own_pos)[:2]  # direction away from own goal center
                 away_n = float(np.linalg.norm(away_xy))
                 if away_n < 1e-6:
                     signal = 0.0
@@ -287,7 +300,7 @@ class DefHit(RewardFunction[AgentID, GameState, float]):
                     v_hat = v_xy / v_xy_n
                     d_hat = away_xy / away_n
                     align = float(np.clip(np.dot(v_hat, d_hat), -1.0, 1.0))
-                    speed_n = float(_norm_speed(v_xy_n, MAX_BALL_SPEED))
+                    speed_n = float(_norm_speed(v_xy_n, BALL_HIT_SPEED_NORM))
                     signal = align * speed_n  # [-1,1]
 
             out[a] = self.weight * (signal * inv_window)
@@ -431,22 +444,81 @@ class NearestBoostAvailability(RewardFunction[AgentID, GameState, float]):
 
 
 class MeanDistToTeammates(RewardFunction[AgentID, GameState, float]):
-    """Dense shaping: mean distance to teammates, normalized to [0,1]."""
-    def __init__(self, weight: float = 1.0):
-        super().__init__(); self.weight = float(weight)
+    """
+    Zone-based teammate spacing reward.
+
+    Signal is negative when teammates are too close (crowding), zero at the
+    inner radius r_eff, and positive up to +1 at the outer radius R_eff.
+
+    Both radii scale linearly with each agent's distance to the nearest goal:
+      - Near a goal  (dist ≈ 0)      → r_eff = r_near, R_eff = R_near  (tighter)
+      - At midfield  (dist ≈ 5120)   → r_eff = r_far,  R_eff = R_far   (wider)
+
+    This allows natural bunching near the net (transitions, blocks, shots)
+    while still rewarding spread-out play in the open field.
+
+    Output in [-1, 1]:
+      -1  →  mean teammate dist = 0 (fully stacked)
+       0  →  mean teammate dist = r_eff
+      +1  →  mean teammate dist ≥ R_eff
+    """
+    def __init__(
+        self,
+        weight: float = 1.0,
+        r_far:  float = 900.0,
+        R_far:  float = 5000.0,
+        r_near: float = 300.0,
+        R_near: float = 3500.0,
+    ):
+        super().__init__()
+        self.weight = float(weight)
+        self.r_far  = float(r_far)
+        self.R_far  = float(R_far)
+        self.r_near = float(r_near)
+        self.R_near = float(R_near)
+
     def reset(self, agents, initial_state, shared): pass
+
     def get_rewards(self, agents, state, is_term, is_trunc, shared):
         out = {}
+        blue_goal_w   = np.asarray(BLUE_GOAL_BACK,   dtype=np.float32)
+        orange_goal_w = np.asarray(ORANGE_GOAL_BACK, dtype=np.float32)
+
         for a in agents:
             car, p, *_ = _rel(state, a)
             my_pos = np.asarray(p.position, dtype=np.float32)
+
+            # World-frame position for goal-proximity scaling
+            my_pos_w = np.asarray(state.cars[a].physics.position, dtype=np.float32)
+            dist_to_goal = float(min(
+                np.linalg.norm(my_pos_w - blue_goal_w),
+                np.linalg.norm(my_pos_w - orange_goal_w),
+            ))
+            # 0 = at a goal, 1 = at half-field distance or beyond
+            goal_frac = _clip01(dist_to_goal / ARENA_HALF_LENGTH_Y)
+            r_eff = self.r_near + goal_frac * (self.r_far  - self.r_near)
+            R_eff = self.R_near + goal_frac * (self.R_far  - self.R_near)
+
             dists = []
             for aid, c in state.cars.items():
                 if aid == a or c.team_num != car.team_num:
                     continue
                 _, tp, *_ = _rel(state, aid)
-                dists.append(np.linalg.norm(my_pos - np.asarray(tp.position, dtype=np.float32)))
-            out[a] = self.weight * (_norm_dist(float(np.mean(dists))) if dists else 0.0)
+                dists.append(float(np.linalg.norm(my_pos - np.asarray(tp.position, dtype=np.float32))))
+
+            if not dists:
+                out[a] = 0.0
+                continue
+
+            mean_d = float(np.mean(dists))
+            if mean_d < r_eff:
+                # Crowding: -1 at d=0, 0 at d=r_eff
+                signal = (mean_d / r_eff) - 1.0
+            else:
+                # Reward: 0 at r_eff, +1 at R_eff, flat beyond
+                signal = min((mean_d - r_eff) / max(R_eff - r_eff, 1.0), 1.0)
+
+            out[a] = self.weight * float(signal)
         return out
 
 
@@ -501,8 +573,11 @@ class HomeGoalProximity(RewardFunction[AgentID, GameState, float]):
 
 class BehindOtherPlayers(RewardFunction[AgentID, GameState, float]):
     """
-    Fraction of other cars that are 'ahead' of me relative to my OWN goal.
-    Output in [0,1]; already bounded.
+    Fraction of other cars (all 5) that are farther from THIS agent's own goal
+    than the agent itself, measured in world-frame coordinates.
+
+    Output in [0, 1]:  1.0 = agent is the last car back (most defensive).
+    Formula: players_farther_from_homegoal / (total_players - 1)
     """
     def __init__(self, weight: float = 1.0):
         super().__init__(); self.weight = float(weight)
@@ -510,15 +585,26 @@ class BehindOtherPlayers(RewardFunction[AgentID, GameState, float]):
     def get_rewards(self, agents, state, is_term, is_trunc, shared):
         out = {}
         for a in agents:
-            _, p, _, _, own_goal, _ = _rel(state, a)
-            me_d = np.linalg.norm(np.asarray(p.position, np.float32) - own_goal)
-            others = []
+            car_a = state.cars[a]
+            is_orange = (car_a.team_num == ORANGE_TEAM)
+            # All distances in world frame so every car is on the same scale
+            own_goal = np.asarray(
+                ORANGE_GOAL_BACK if is_orange else BLUE_GOAL_BACK, dtype=np.float32
+            )
+            my_pos = np.asarray(car_a.physics.position, np.float32)
+            me_d = float(np.linalg.norm(my_pos - own_goal))
+
+            n_farther = 0
+            n_others = 0
             for aid in state.cars.keys():
                 if aid == a:
                     continue
-                _, p2, _, _, own_goal2, _ = _rel(state, aid)
-                others.append(np.linalg.norm(np.asarray(p2.position, np.float32) - own_goal2))
-            frac = 0.0 if not others else float(sum(d < me_d for d in others)) / float(len(others))
+                n_others += 1
+                other_pos = np.asarray(state.cars[aid].physics.position, np.float32)
+                if float(np.linalg.norm(other_pos - own_goal)) > me_d:
+                    n_farther += 1
+
+            frac = 0.0 if n_others == 0 else float(n_farther) / float(n_others)
             out[a] = self.weight * frac
         return out
 
@@ -556,7 +642,7 @@ class _CompositeBase(RewardFunction[AgentID, GameState, float]):
     def __init__(self, weights: Dict[str, float] | None = None):
         super().__init__()
         self._weights: Dict[str, float] = self.default_weights() if weights is None else dict(weights)
-        self._combo = CombinedReward(*self.parts(self._weights))
+        self._combo = LoggedCombinedReward(*self.parts(self._weights))
 
     # override in subclasses
     def default_weights(self) -> Dict[str, float]: return {}
@@ -564,7 +650,7 @@ class _CompositeBase(RewardFunction[AgentID, GameState, float]):
 
     def set_weights(self, new_w: Dict[str, float]) -> None:
         self._weights.update(new_w)
-        self._combo = CombinedReward(*self.parts(self._weights))
+        self._combo = LoggedCombinedReward(*self.parts(self._weights))
     def get_weights(self) -> Dict[str, float]: return dict(self._weights)
     def mutate(self, sigma: float = DEFAULT_SIGMA, clip: Tuple[float, float] | None = None) -> None:
         lo, hi = (-np.inf, np.inf) if clip is None else clip
@@ -573,65 +659,65 @@ class _CompositeBase(RewardFunction[AgentID, GameState, float]):
 
     def reset(self, agents, initial_state, shared): self._combo.reset(agents, initial_state, shared)
     def get_rewards(self, agents, state, is_term, is_trunc, shared): return self._combo.get_rewards(agents, state, is_term, is_trunc, shared)
+    def get_last_breakdown(self, aid: AgentID) -> Dict[str, float]:
+        lb = getattr(self._combo, "last_breakdown", None)
+        if not isinstance(lb, dict):
+            return {}
+        d = lb.get(aid, {})
+        return dict(d) if isinstance(d, dict) else {}
 
 
 class StrikerCompositeReward(_CompositeBase):
     def default_weights(self) -> Dict[str, float]:
         return {
             'dist_to_ball': 1.0e-5,
-            'car_speed': 1.0e-5,
-            'boost_remaining': 1.0e-5,
+            'car_speed': 2.0e-5,
             'ball_hit': 1.5e-2,
             'ball_dist_to_goal': 1.0e-5,
             'face_ball': 5.0e-5,
-            'shot_alignment': 5.0e-5,
-            'supersonic_bonus': 1.0e-5,
+            'shot_alignment': 7.5e-5,
             'goal': 10.0,
             'touch': 2.0e-2,
         }
     def parts(self, w: Dict[str, float]):
         return [
-            (GoalReward(), w['goal']),
-            (TouchReward(), w['touch']),
-            (DistToBall(), w['dist_to_ball']),
-            (CarSpeed(), w['car_speed']),
-            (BoostRemaining(), w['boost_remaining']),
-            (BallHit(), w['ball_hit']),
-            (BallDistToGoal(), w['ball_dist_to_goal']),
-            (FaceBall(), w['face_ball']),
-            (ShotAlignment(), w['shot_alignment']),
-            (SupersonicBonus(), w['supersonic_bonus']),
+            ("goal", GoalReward(), w["goal"]),
+            ("touch", TouchReward(), w["touch"]),
+            ("dist_to_ball", DistToBall(), w["dist_to_ball"]),
+            ("car_speed", CarSpeed(), w["car_speed"]),
+            ("ball_hit", BallHit(), w["ball_hit"]),
+            ("ball_dist_to_goal", BallDistToGoal(), w["ball_dist_to_goal"]),
+            ("face_ball", FaceBall(), w["face_ball"]),
+            ("shot_alignment", ShotAlignment(), w["shot_alignment"]),
         ]
 
 
 class DefenderCompositeReward(_CompositeBase):
     def default_weights(self) -> Dict[str, float]:
         return {
-            'boost_remaining': 1.0e-5,
             'dist_to_ball': 1.0e-5,
             'centerline_proximity': 2.0e-5,
             'home_goal_proximity': 5.0e-5,
             'face_ball': 5.0e-5,
             'block_alignment': 5.0e-5,
             'behind_ball_defensive': 5.0e-5,
-            'behind_other_players': 5.0e-5,
+            'behind_other_players': 2.5e-5,
             'def_hit': 3.0e-2,
             'touch': 1.0e-2,
             'goal': 10.0,
         }
     def parts(self, w: Dict[str, float]):
         return [
-            (GoalReward(), w['goal']),
-            (TouchReward(), w['touch']),
-            (DistToBall(), w['dist_to_ball']),
-            (BoostRemaining(), w['boost_remaining']),
-            (DefHit(), w['def_hit']),
-            (BehindBallDefensive(), w['behind_ball_defensive']),
-            (CenterlineProximity(), w['centerline_proximity']),
-            (FaceBall(), w['face_ball']),
-            (BehindOtherPlayers(), w['behind_other_players']),
-            (HomeGoalProximity(), w['home_goal_proximity']),
-            (BlockAlignment(), w['block_alignment']),
+            ("goal", GoalReward(), w["goal"]),
+            ("touch", TouchReward(), w["touch"]),
+            ("dist_to_ball", DistToBall(), w["dist_to_ball"]),
+            ("def_hit", DefHit(), w["def_hit"]),
+            ("behind_ball_defensive", BehindBallDefensive(), w["behind_ball_defensive"]),
+            ("centerline_proximity", CenterlineProximity(), w["centerline_proximity"]),
+            ("face_ball", FaceBall(), w["face_ball"]),
+            ("behind_other_players", BehindOtherPlayers(), w["behind_other_players"]),
+            ("home_goal_proximity", HomeGoalProximity(), w["home_goal_proximity"]),
+            ("block_alignment", BlockAlignment(), w["block_alignment"]),
         ]
 
 
@@ -639,30 +725,26 @@ class PositioningCompositeReward(_CompositeBase):
     def default_weights(self) -> Dict[str, float]:
         return {
             'mean_dist_to_teammates': 1.0e-5,
-            'mean_dist_to_opponents': 1.0e-5,
             'centerline_proximity': 1.0e-5,
             'face_ball': 5.0e-5,
-            'face_goal': 5.0e-5,
-            'car_speed': 1.0e-5,
-            'boost_remaining': 1.0e-5,
+            'car_speed': 2.0e-5,
             'def_hit': 1.0e-2,
+            'ball_hit': 1.5e-2,
             'shot_alignment': 5.0e-5,
             'block_alignment': 5.0e-5,
             'goal': 10.0,
         }
     def parts(self, w: Dict[str, float]):
         return [
-            (GoalReward(), w['goal']),
-            (MeanDistToTeammates(), w['mean_dist_to_teammates']),
-            (MeanDistToOpponents(), w['mean_dist_to_opponents']),
-            (CenterlineProximity(), w['centerline_proximity']),
-            (FaceBall(), w['face_ball']),
-            (FaceGoal(), w['face_goal']),
-            (CarSpeed(), w['car_speed']),
-            (BoostRemaining(), w['boost_remaining']),
-            (DefHit(), w['def_hit']),
-            (ShotAlignment(), w['shot_alignment']),
-            (BlockAlignment(), w['block_alignment']),
+            ("goal", GoalReward(), w["goal"]),
+            ("mean_dist_to_teammates", MeanDistToTeammates(), w["mean_dist_to_teammates"]),
+            ("centerline_proximity", CenterlineProximity(), w["centerline_proximity"]),
+            ("face_ball", FaceBall(), w["face_ball"]),
+            ("car_speed", CarSpeed(), w["car_speed"]),
+            ("def_hit", DefHit(), w["def_hit"]),
+            ("ball_hit", BallHit(), w["ball_hit"]),
+            ("shot_alignment", ShotAlignment(), w["shot_alignment"]),
+            ("block_alignment", BlockAlignment(), w["block_alignment"]),
         ]
 
 

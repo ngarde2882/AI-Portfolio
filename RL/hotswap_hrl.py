@@ -316,6 +316,13 @@ class ACProfilePolicy:
         self.last_switch_time: Dict[Any, float] = {}
         self._step_counter = 0
 
+
+        # --- training buffer (very simple A2C on match outcome) ---
+        self.training = True
+        self._train_obs = []
+        self._train_acts = []
+        self._train_vals = []
+
     # ---------- helpers ----------
 
     def _ensure_net(self, obs_dim: int):
@@ -457,49 +464,126 @@ class ACProfilePolicy:
         self.last_switch_time.clear()
         self._step_counter = 0
         # keep net/opt alive across episodes
+        self._train_obs.clear()
+        self._train_acts.clear()
+        self._train_vals.clear()
+        # keep net/opt alive across episodes
 
     @torch.no_grad()
     def act(self, state: GameState, team_agents: List[Any]) -> Dict[Any, str]:
         """
         Decide profile for each agent given the current GameState.
-        `team_is_orange` is ignored for building obs; we infer the controlled team from the first agent.
+        Uses a shared team-level observation vector repeated for all agents in `team_agents`.
         """
         if not team_agents:
             return {}
 
         # Build shared team-level obs and ensure AC net exists
         team_obs = self._build_team_obs(state, team_agents)
-        self._ensure_net(team_obs.size)
+        self._ensure_net(int(team_obs.size))
 
         # Same team_obs for each agent in this call
         x_np = np.repeat(team_obs[None, :], len(team_agents), axis=0)
         x = torch.as_tensor(x_np, dtype=torch.float32, device=self.device)
 
-        logits, _ = self.net(x)
+        logits, v = self.net(x)  # v: [N, 1]
+        v = v.squeeze(-1)        # [N]
 
-        # apply per-agent switch penalty in logit space
-        logits_np = logits.cpu().numpy()
+        # Apply per-agent switch penalty in logit space
+        # penalty[i, j] = penalty for assigning agent i to profile j
+        penalty = torch.zeros_like(logits)
         for i, aid in enumerate(team_agents):
-            for name, idx in self.name_to_idx.items():
-                logits_np[i, idx] -= self._switch_penalty(aid, state, name)
+            for name, j in self.name_to_idx.items():
+                penalty[i, j] = float(self._switch_penalty(aid, state, name))
 
-        probs = torch.softmax(
-            torch.as_tensor(logits_np, dtype=torch.float32, device=self.device),
-            dim=-1
-        )
-        # Deterministic for now; you can change to sampling for exploration
-        actions = torch.argmax(probs, dim=-1)
+        logits_adj = logits - penalty
+        dist = torch.distributions.Categorical(logits=logits_adj)
+
+        if self.training:
+            actions = dist.sample()
+        else:
+            actions = torch.argmax(logits_adj, dim=-1)
 
         out: Dict[Any, str] = {}
         for i, aid in enumerate(team_agents):
-            choice = self.profile_names[int(actions[i].item())]
+            a_idx = int(actions[i].item())
+            choice = self.profile_names[a_idx]
+
+            # switch bookkeeping
             if self.current_choice.get(aid) != choice:
                 self.last_switch_time[aid] = _get_time_seconds(state)
                 self.current_choice[aid] = choice
             out[aid] = choice
 
+            # training buffer: store (obs, act_idx, value) for match-level return learning
+            if self.training:
+                self._train_obs.append(team_obs.copy())
+                self._train_acts.append(a_idx)
+                self._train_vals.append(float(v[i].item()))
+
         self._step_counter += 1
         return out
+
+
+    def set_training(self, enabled: bool) -> None:
+        self.training = bool(enabled)
+
+    def finalize_match(self, outcome_reward: float) -> None:
+        """Very simple outcome-based learning signal.
+
+        Applies the same terminal reward to every AC decision taken this match:
+          +outcome_reward for win, -outcome_reward for loss, 0 for tie (caller chooses sign).
+        """
+        if (not self.training) or (self.net is None) or (self.opt is None):
+            # Nothing to do (either frozen or not initialized yet).
+            self._train_obs.clear(); self._train_acts.clear(); self._train_vals.clear()
+            return
+        if not self._train_obs:
+            return
+
+        batch_obs = np.asarray(self._train_obs, dtype=np.float32)
+        acts_idx  = np.asarray(self._train_acts, dtype=np.int64)
+        vals      = np.asarray(self._train_vals, dtype=np.float32)
+        returns   = np.full_like(vals, float(outcome_reward), dtype=np.float32)
+        adv       = returns - vals
+
+        self.step_update(batch_obs=batch_obs, acts_idx=acts_idx, returns=returns, adv=adv)
+
+        self._train_obs.clear()
+        self._train_acts.clear()
+        self._train_vals.clear()
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Serialize AC policy (network + optimizer + metadata)."""
+        bundle: Dict[str, Any] = {
+            "profile_names": list(self.profile_names),
+            "obs_dim": int(self.obs_dim) if self.obs_dim is not None else None,
+            "cfg": asdict(self.cfg) if hasattr(self.cfg, "__dict__") else None,
+        }
+        if self.net is not None:
+            bundle["net"] = self.net.state_dict()
+        if self.opt is not None:
+            bundle["opt"] = self.opt.state_dict()
+        return bundle
+
+    def load_from_state_dict(self, bundle: Dict[str, Any]) -> None:
+        """Load AC policy from a bundle produced by state_dict()."""
+        # profile_names must match; if they don't, we keep current mapping and only load matching weights.
+        obs_dim = bundle.get("obs_dim", None)
+        if (self.net is None) and (obs_dim is not None):
+            self._ensure_net(int(obs_dim))
+
+        net_sd = bundle.get("net", None)
+        if (net_sd is not None) and (self.net is not None):
+            self.net.load_state_dict(net_sd)
+
+        opt_sd = bundle.get("opt", None)
+        if (opt_sd is not None) and (self.opt is not None):
+            try:
+                self.opt.load_state_dict(opt_sd)
+            except Exception:
+                pass
+
 
     # training hook unchanged; you can feed returns/adv built from win-condition rewards
     def step_update(self, batch_obs: np.ndarray, acts_idx: np.ndarray, returns: np.ndarray, adv: np.ndarray):
@@ -535,6 +619,12 @@ class HotswapACAdapter:
             if manager.current_name.get(aid) != name:
                 manager.set_profile(aid, state, name)   # <- use setter
         return choices
+
+    def finalize_match(self, outcome_reward: float) -> None:
+        self.policy.finalize_match(float(outcome_reward))
+
+    def set_training(self, enabled: bool) -> None:
+        self.policy.set_training(bool(enabled))
 
 
 # ----------------------------------------------------------------------------

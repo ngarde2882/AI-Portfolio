@@ -18,8 +18,7 @@ class AdvancedObs(DefaultObs):
       - extra partially observable vars per-agent:
           car.boost_active_time (float), car.supersonic_time (float),
           car.wheels_with_contact (4 bools -> ints)
-
-      - profile/role one-hot for self (from shared_info)
+      - profile one-hot for self (from shared_info)
       - teammate profile one-hots (distance-sorted, from shared_info)  [teammates only]
       - streamlined team-shape features (team-relative frame):
           * distances to teammates (sorted)
@@ -27,10 +26,9 @@ class AdvancedObs(DefaultObs):
           * team centroids (ally/opponent) and centroid distance
           * triangle area for each team (3v3)
           * summed velocities: teammates-only (excluding self) and opponents (all opponents)
-
     The adapter supplies:
       - 'touch_buffer'
-      - 'profile_by_agent' and 'role_by_agent'
+      - 'profile_by_agent'
     """
     def __init__(
         self,
@@ -41,8 +39,8 @@ class AdvancedObs(DefaultObs):
         z_max: float = 2044.0,
         air_threshold: float = 300.0,
         touch_k: int = 8,
+        action_hist_k: int = 16,
         profile_names=None,
-        role_names=("striker", "positioning", "defender"),
         max_teammates: int = 2,  # for 3v3
         **kwargs
     ):
@@ -55,11 +53,10 @@ class AdvancedObs(DefaultObs):
         self.air_threshold = float(air_threshold)
         self.touch_k = int(touch_k)
 
-        # profile + role names for one-hots
+        self.action_hist_k = int(action_hist_k)
+        # profile names for one-hots
         self.profile_names = list(profile_names or [])
         self.profile_name_to_idx = {n: i for i, n in enumerate(self.profile_names)}
-        self.role_names = list(role_names)
-        self.role_to_idx = {r: i for i, r in enumerate(self.role_names)}
 
         self.max_teammates = int(max_teammates)
 
@@ -137,33 +134,24 @@ class AdvancedObs(DefaultObs):
     # ---------------------------- extra partially observable vars ----------------------------
 
     def _extra_po(self, car) -> np.ndarray:
-        bat = float(getattr(car, "boost_active_time", 0.0))
-        sst = float(getattr(car, "supersonic_time", 0.0))
-        w = getattr(car, "wheels_with_contact", (False, False, False, False))
-        wheels = np.array(
-            [int(bool(x)) for x in (w if isinstance(w, (list, tuple)) else (False, False, False, False))],
-            dtype=np.float32
-        )
+        # These are concrete fields on rlgym's Car; if they're missing/None, we want to fail loudly.
+        bat = float(car.boost_active_time)
+        sst = float(car.supersonic_time)
+        w = car.wheels_with_contact
+        wheels = np.array([int(bool(x)) for x in w], dtype=np.float32)
         return np.concatenate([np.array([bat, sst], dtype=np.float32), wheels])
 
     # ---------------------------- profile features ----------------------------
 
     def _self_profile_features(self, agent: AgentID, shared_info: Dict[str, Any]) -> np.ndarray:
-        role_by_agent = shared_info.get("role_by_agent", {})
+        """One-hot of this car's deployed low-level *profile name* (e.g., s1/p2/d4)."""
         prof_by_agent = shared_info.get("profile_by_agent", {})
-
-        role = str(role_by_agent.get(agent, "")).lower()
         prof = str(prof_by_agent.get(agent, ""))
-
-        role_oh = np.zeros((len(self.role_names),), dtype=np.float32)
-        if role in self.role_to_idx:
-            role_oh[self.role_to_idx[role]] = 1.0
 
         prof_oh = np.zeros((len(self.profile_names),), dtype=np.float32)
         if prof in self.profile_name_to_idx:
             prof_oh[self.profile_name_to_idx[prof]] = 1.0
-
-        return np.concatenate([role_oh, prof_oh]).astype(np.float32)
+        return prof_oh.astype(np.float32)
 
     def _teammate_profile_features(self, agent: AgentID, state: GameState, shared_info: Dict[str, Any]) -> np.ndarray:
         """
@@ -231,7 +219,7 @@ class AdvancedObs(DefaultObs):
         for aid, c in state.cars.items():
             phys = c.inverted_physics if inverted else c.physics
             xy = np.asarray(phys.position[:2], dtype=np.float32)
-            vel = self._safe_vec3(getattr(phys, "linear_velocity", (0, 0, 0)))
+            vel = self._safe_vec3(phys.linear_velocity)
 
             if c.team_num == car.team_num:
                 ally_xy.append(xy)
@@ -297,6 +285,12 @@ class AdvancedObs(DefaultObs):
         if len(tb) < self.touch_k:
             tb = list(tb) + [0.0] * (self.touch_k - len(tb))
         tb = np.asarray(tb[: self.touch_k], dtype=np.float32)
+        # action history buffer (per-car), supplied by EngineEnvAdapter
+        ah_map = shared_info.get("action_hist_by_agent", {})
+        ah = ah_map.get(agent, [])
+        if len(ah) < self.action_hist_k:
+            ah = list(ah) + [0.0] * (self.action_hist_k - len(ah))
+        ah = np.asarray(ah[: self.action_hist_k], dtype=np.float32)
 
         car = state.cars[agent]
         po_extra = self._extra_po(car)
@@ -306,7 +300,7 @@ class AdvancedObs(DefaultObs):
         team_shape = self._team_shape_features(agent, state)
 
         return np.concatenate(
-            [base, grid, tb, po_extra, self_prof, teammate_prof, team_shape],
+            [base, grid, tb, ah, po_extra, self_prof, teammate_prof, team_shape],
             dtype=np.float32
         )
 
@@ -315,7 +309,7 @@ class AdvancedObs(DefaultObs):
         C, Z, W, H = 3, self.z_bins, self.grid_bins[0], self.grid_bins[1]
 
         po_extra = 6  # bat,sst + 4 wheels
-        self_prof = len(self.role_names) + len(self.profile_names)
+        self_prof = len(self.profile_names)
         teammate_prof = self.max_teammates * len(self.profile_names)
 
         # team_shape dims:
@@ -326,5 +320,5 @@ class AdvancedObs(DefaultObs):
         #   summed vels: 6
         team_shape = self.max_teammates + 1 + 5 + 2 + 6
 
-        extra = (C * Z * W * H) + self.touch_k + po_extra + self_prof + teammate_prof + team_shape
+        extra = (C * Z * W * H) + self.touch_k + self.action_hist_k + po_extra + self_prof + teammate_prof + team_shape
         return kind, base_n + extra
