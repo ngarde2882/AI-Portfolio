@@ -1,0 +1,29 @@
+#!/bin/bash
+##ENVIRONMENT SETTINGS; CHANGE WITH CAUTION
+#SBATCH --export=NONE                #Do not propagate environment
+#SBATCH --get-user-env               #Replicate login environment
+#
+##NECESSARY JOB SPECIFICATIONS
+#SBATCH --job-name=cholesky_factorization
+#SBATCH --time=10:00:00               #Set the wall clock limit
+#SBATCH --nodes=1                    #Request 1 node
+#SBATCH --ntasks-per-node=1          #Request 1 tasks/cores per node
+#SBATCH --cpus-per-task=1
+#SBATCH --gres=gpu:a100:1            #Request 1 A100 GPU
+#SBATCH --partition=gpu              #Request the GPU partition/queue
+#SBATCH --mem=10G                    #Request 10GB per node 
+#SBATCH --output=%j_s.output           #Send stdout/err to "[jobID].output" 
+#
+##OPTIONAL JOB SPECIFICATIONS
+##SBATCH --mail-type=ALL              #Send email on all job events
+##SBATCH --mail-user=ngarde2882@tamu.edu    #Send all emails to email_address 
+#
+module load intel CUDA
+nvcc -arch=sm_80 -o cholesky.exe cholesky_gpu.cu
+#           mat_size BlockXDim BlockYDim        blockx*blocky<=1024
+# ./cholesky.exe <n> <blockx> <blocky>
+# test run
+./cholesky.exe 4096 32 32
+./cholesky.exe 8192 32 32
+./cholesky.exe 16384 32 32
+##

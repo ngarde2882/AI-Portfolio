@@ -1,0 +1,2 @@
+this run included 1677 matches to test current obs and reward schemes. several changes were made based on analysis of reward contributions including adjustments to annealing.
+HL agents got more attention after this run, atp they were just figures randomly assigning their agents and would often rely on a single player. the hope is that better rewards and good obs will result in smooth learning and varied deployments, but that is up to the controller testing.

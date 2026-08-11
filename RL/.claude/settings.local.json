@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/nick2/.claude/projects/**)",
+      "Bash(python -c \":*)",
+      "Bash(python -c \"import sys; [print\\(h\\) for h in sys.stdin.read\\(\\).split\\('''',''''\\)]\")",
+      "Bash(python -:*)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\nick2\\.claude\\projects\\c--Users-nick2-Desktop-School-Stuff-stats-AI-Portfolio-RL\\memory"
+    ]
+  }
+}

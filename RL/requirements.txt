@@ -1,0 +1,18 @@
+# Core RL / sim
+rlgym==2.0.0
+rlgym-api==2.0.0
+rlgym-rocket-league==2.0.0
+RocketSim==2.1.1.post1
+rlgym-ppo @ git+https://github.com/AechPro/rlgym-ppo@4ffd2e924198bf4b2d59f4bf280b29919d7c07ea
+
+# ML
+# Install PyTorch separately via setup_hprc.sh (CUDA version)
+numpy==1.25.2
+scikit-learn==1.6.1
+scipy==1.13.1
+
+# Utilities
+tqdm==4.67.3
+pandas==1.5.3
+matplotlib==3.9.4
+wandb==0.19.8

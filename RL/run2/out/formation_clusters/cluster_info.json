@@ -1,0 +1,452 @@
+[
+  {
+    "cluster_id": 29,
+    "size": 2100,
+    "field_zone": "mid_blue",
+    "ball_py": -1658.6,
+    "ball_speed": 30.2,
+    "own_spread_y": 1897.0,
+    "representative": {
+      "match_id": 1022,
+      "tick": 23064,
+      "time_s": 192.2,
+      "perspective": "blue",
+      "source_file": "1022)team3_balancevteam2_striker_heavy.csv"
+    }
+  },
+  {
+    "cluster_id": 24,
+    "size": 764,
+    "field_zone": "mid_blue",
+    "ball_py": -1049.1,
+    "ball_speed": 14.8,
+    "own_spread_y": 4563.0,
+    "representative": {
+      "match_id": 1022,
+      "tick": 33544,
+      "time_s": 279.53333333333336,
+      "perspective": "orange",
+      "source_file": "1022)team3_balancevteam2_striker_heavy.csv"
+    }
+  },
+  {
+    "cluster_id": 27,
+    "size": 904,
+    "field_zone": "center",
+    "ball_py": -999.0,
+    "ball_speed": 20.5,
+    "own_spread_y": 5957.8,
+    "representative": {
+      "match_id": 1022,
+      "tick": 3920,
+      "time_s": 32.666666666666664,
+      "perspective": "orange",
+      "source_file": "1022)team3_balancevteam2_striker_heavy.csv"
+    }
+  },
+  {
+    "cluster_id": 19,
+    "size": 920,
+    "field_zone": "center",
+    "ball_py": -755.0,
+    "ball_speed": 61.7,
+    "own_spread_y": 6379.7,
+    "representative": {
+      "match_id": 1026,
+      "tick": 32632,
+      "time_s": 271.93333333333334,
+      "perspective": "orange",
+      "source_file": "1026)team8_baselinevteam2_striker_heavy.csv"
+    }
+  },
+  {
+    "cluster_id": 16,
+    "size": 992,
+    "field_zone": "center",
+    "ball_py": -515.4,
+    "ball_speed": 20.0,
+    "own_spread_y": 4554.9,
+    "representative": {
+      "match_id": 972,
+      "tick": 3280,
+      "time_s": 27.33333333333333,
+      "perspective": "orange",
+      "source_file": "972)team1_striker_balancevteam2_striker_heavy.csv"
+    }
+  },
+  {
+    "cluster_id": 3,
+    "size": 968,
+    "field_zone": "center",
+    "ball_py": -477.5,
+    "ball_speed": 10.5,
+    "own_spread_y": 5795.7,
+    "representative": {
+      "match_id": 972,
+      "tick": 2680,
+      "time_s": 22.33333333333333,
+      "perspective": "orange",
+      "source_file": "972)team1_striker_balancevteam2_striker_heavy.csv"
+    }
+  },
+  {
+    "cluster_id": 8,
+    "size": 1139,
+    "field_zone": "center",
+    "ball_py": -298.1,
+    "ball_speed": 18.1,
+    "own_spread_y": 6372.5,
+    "representative": {
+      "match_id": 1022,
+      "tick": 11680,
+      "time_s": 97.33333333333331,
+      "perspective": "orange",
+      "source_file": "1022)team3_balancevteam2_striker_heavy.csv"
+    }
+  },
+  {
+    "cluster_id": 1,
+    "size": 1500,
+    "field_zone": "center",
+    "ball_py": -268.1,
+    "ball_speed": 13.9,
+    "own_spread_y": 3232.6,
+    "representative": {
+      "match_id": 1006,
+      "tick": 5320,
+      "time_s": 44.333333333333336,
+      "perspective": "orange",
+      "source_file": "1006)team3_balancevteam1_striker_balance.csv"
+    }
+  },
+  {
+    "cluster_id": 17,
+    "size": 2253,
+    "field_zone": "center",
+    "ball_py": -147.4,
+    "ball_speed": 4.9,
+    "own_spread_y": 2035.0,
+    "representative": {
+      "match_id": 977,
+      "tick": 19760,
+      "time_s": 164.66666666666666,
+      "perspective": "blue",
+      "source_file": "977)team3_balancevteam7_def_balance.csv"
+    }
+  },
+  {
+    "cluster_id": 14,
+    "size": 183,
+    "field_zone": "center",
+    "ball_py": -98.2,
+    "ball_speed": 575.9,
+    "own_spread_y": 3091.4,
+    "representative": {
+      "match_id": 1027,
+      "tick": 14480,
+      "time_s": 120.66666666666669,
+      "perspective": "blue",
+      "source_file": "1027)team8_baselinevteam2_striker_heavy.csv"
+    }
+  },
+  {
+    "cluster_id": 2,
+    "size": 3805,
+    "field_zone": "center",
+    "ball_py": -81.5,
+    "ball_speed": 2.1,
+    "own_spread_y": 1838.0,
+    "representative": {
+      "match_id": 1032,
+      "tick": 120,
+      "time_s": 1.0,
+      "perspective": "orange",
+      "source_file": "1032)team8_baselinevteam8_baseline.csv"
+    }
+  },
+  {
+    "cluster_id": 10,
+    "size": 3682,
+    "field_zone": "center",
+    "ball_py": -71.9,
+    "ball_speed": 2.3,
+    "own_spread_y": 1977.8,
+    "representative": {
+      "match_id": 966,
+      "tick": 31920,
+      "time_s": 266.0,
+      "perspective": "blue",
+      "source_file": "966)team8_baselinevteam5_balance2.csv"
+    }
+  },
+  {
+    "cluster_id": 6,
+    "size": 2423,
+    "field_zone": "center",
+    "ball_py": -62.3,
+    "ball_speed": 3.6,
+    "own_spread_y": 2553.0,
+    "representative": {
+      "match_id": 996,
+      "tick": 33640,
+      "time_s": 280.3333333333333,
+      "perspective": "orange",
+      "source_file": "996)team6_def_strikervteam4_pos_striker.csv"
+    }
+  },
+  {
+    "cluster_id": 20,
+    "size": 2899,
+    "field_zone": "center",
+    "ball_py": -51.2,
+    "ball_speed": 4.6,
+    "own_spread_y": 1652.3,
+    "representative": {
+      "match_id": 962,
+      "tick": 9360,
+      "time_s": 78.0,
+      "perspective": "orange",
+      "source_file": "962)team4_pos_strikervteam6_def_striker.csv"
+    }
+  },
+  {
+    "cluster_id": 0,
+    "size": 3812,
+    "field_zone": "center",
+    "ball_py": -43.4,
+    "ball_speed": 2.2,
+    "own_spread_y": 1908.4,
+    "representative": {
+      "match_id": 1033,
+      "tick": 120,
+      "time_s": 1.0,
+      "perspective": "blue",
+      "source_file": "1033)team8_baselinevteam8_baseline.csv"
+    }
+  },
+  {
+    "cluster_id": 9,
+    "size": 2645,
+    "field_zone": "center",
+    "ball_py": -24.2,
+    "ball_speed": 2.8,
+    "own_spread_y": 1992.4,
+    "representative": {
+      "match_id": 987,
+      "tick": 11040,
+      "time_s": 92.0,
+      "perspective": "blue",
+      "source_file": "987)team8_baselinevteam3_balance.csv"
+    }
+  },
+  {
+    "cluster_id": 21,
+    "size": 3105,
+    "field_zone": "center",
+    "ball_py": -23.1,
+    "ball_speed": 3.2,
+    "own_spread_y": 1841.1,
+    "representative": {
+      "match_id": 962,
+      "tick": 17720,
+      "time_s": 147.66666666666666,
+      "perspective": "blue",
+      "source_file": "962)team4_pos_strikervteam6_def_striker.csv"
+    }
+  },
+  {
+    "cluster_id": 12,
+    "size": 3147,
+    "field_zone": "center",
+    "ball_py": -18.5,
+    "ball_speed": 2.8,
+    "own_spread_y": 1990.0,
+    "representative": {
+      "match_id": 991,
+      "tick": 80,
+      "time_s": 0.6666666666666666,
+      "perspective": "orange",
+      "source_file": "991)team8_baselinevteam4_pos_striker.csv"
+    }
+  },
+  {
+    "cluster_id": 25,
+    "size": 2799,
+    "field_zone": "center",
+    "ball_py": -3.9,
+    "ball_speed": 1.0,
+    "own_spread_y": 1822.2,
+    "representative": {
+      "match_id": 1016,
+      "tick": 23000,
+      "time_s": 191.66666666666663,
+      "perspective": "blue",
+      "source_file": "1016)team8_baselinevteam6_def_striker.csv"
+    }
+  },
+  {
+    "cluster_id": 15,
+    "size": 2640,
+    "field_zone": "center",
+    "ball_py": -0.6,
+    "ball_speed": 6.7,
+    "own_spread_y": 2069.0,
+    "representative": {
+      "match_id": 1011,
+      "tick": 40,
+      "time_s": 0.3333333333333333,
+      "perspective": "orange",
+      "source_file": "1011)team2_striker_heavyvteam5_balance2.csv"
+    }
+  },
+  {
+    "cluster_id": 7,
+    "size": 2330,
+    "field_zone": "center",
+    "ball_py": 39.6,
+    "ball_speed": 11.1,
+    "own_spread_y": 2349.9,
+    "representative": {
+      "match_id": 1026,
+      "tick": 11712,
+      "time_s": 97.6,
+      "perspective": "blue",
+      "source_file": "1026)team8_baselinevteam2_striker_heavy.csv"
+    }
+  },
+  {
+    "cluster_id": 22,
+    "size": 1378,
+    "field_zone": "center",
+    "ball_py": 101.1,
+    "ball_speed": 74.1,
+    "own_spread_y": 4928.0,
+    "representative": {
+      "match_id": 1001,
+      "tick": 33472,
+      "time_s": 278.93333333333334,
+      "perspective": "blue",
+      "source_file": "1001)team7_def_balancevteam8_baseline.csv"
+    }
+  },
+  {
+    "cluster_id": 23,
+    "size": 1623,
+    "field_zone": "center",
+    "ball_py": 119.4,
+    "ball_speed": 7.6,
+    "own_spread_y": 2439.4,
+    "representative": {
+      "match_id": 1006,
+      "tick": 19680,
+      "time_s": 164.0,
+      "perspective": "orange",
+      "source_file": "1006)team3_balancevteam1_striker_balance.csv"
+    }
+  },
+  {
+    "cluster_id": 18,
+    "size": 1326,
+    "field_zone": "center",
+    "ball_py": 181.6,
+    "ball_speed": 61.7,
+    "own_spread_y": 1952.2,
+    "representative": {
+      "match_id": 1026,
+      "tick": 7200,
+      "time_s": 60.0,
+      "perspective": "blue",
+      "source_file": "1026)team8_baselinevteam2_striker_heavy.csv"
+    }
+  },
+  {
+    "cluster_id": 5,
+    "size": 908,
+    "field_zone": "center",
+    "ball_py": 238.9,
+    "ball_speed": 62.5,
+    "own_spread_y": 2988.1,
+    "representative": {
+      "match_id": 972,
+      "tick": 2120,
+      "time_s": 17.666666666666668,
+      "perspective": "orange",
+      "source_file": "972)team1_striker_balancevteam2_striker_heavy.csv"
+    }
+  },
+  {
+    "cluster_id": 11,
+    "size": 100,
+    "field_zone": "center",
+    "ball_py": 267.4,
+    "ball_speed": 140.0,
+    "own_spread_y": 2212.0,
+    "representative": {
+      "match_id": 972,
+      "tick": 27872,
+      "time_s": 232.26666666666668,
+      "perspective": "blue",
+      "source_file": "972)team1_striker_balancevteam2_striker_heavy.csv"
+    }
+  },
+  {
+    "cluster_id": 28,
+    "size": 1235,
+    "field_zone": "center",
+    "ball_py": 379.2,
+    "ball_speed": 5.4,
+    "own_spread_y": 6251.4,
+    "representative": {
+      "match_id": 976,
+      "tick": 24760,
+      "time_s": 206.33333333333331,
+      "perspective": "orange",
+      "source_file": "976)team3_balancevteam7_def_balance.csv"
+    }
+  },
+  {
+    "cluster_id": 4,
+    "size": 2102,
+    "field_zone": "center",
+    "ball_py": 686.9,
+    "ball_speed": 35.2,
+    "own_spread_y": 1693.2,
+    "representative": {
+      "match_id": 1001,
+      "tick": 33712,
+      "time_s": 280.93333333333334,
+      "perspective": "orange",
+      "source_file": "1001)team7_def_balancevteam8_baseline.csv"
+    }
+  },
+  {
+    "cluster_id": 26,
+    "size": 1537,
+    "field_zone": "mid_orange",
+    "ball_py": 2521.5,
+    "ball_speed": 85.1,
+    "own_spread_y": 1634.3,
+    "representative": {
+      "match_id": 982,
+      "tick": 27080,
+      "time_s": 225.66666666666663,
+      "perspective": "blue",
+      "source_file": "982)team4_pos_strikervteam2_striker_heavy.csv"
+    }
+  },
+  {
+    "cluster_id": 13,
+    "size": 643,
+    "field_zone": "deep_orange",
+    "ball_py": 4251.7,
+    "ball_speed": 58.7,
+    "own_spread_y": 3934.6,
+    "representative": {
+      "match_id": 1011,
+      "tick": 24920,
+      "time_s": 207.66666666666663,
+      "perspective": "orange",
+      "source_file": "1011)team2_striker_heavyvteam5_balance2.csv"
+    }
+  }
+]

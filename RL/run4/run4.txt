@@ -1,0 +1,1 @@
+one team (sometimes 2) seem to dominate during training, and instead of other teams interpreting "don't let that happen again" they give up and maximize rewards while getting scored on. I've liked giving the agents a 'fresh start' beginning each training session, but it may be ideal to give agents a private tutorial to goal rewards (+/-) before throwing them into games.

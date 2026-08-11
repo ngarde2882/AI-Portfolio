@@ -1,0 +1,46 @@
+Processes = 1
+n = 100000000, p = 1, pi = 3.1415926535900223, relative error = 7.29e-14, time (sec) =   0.1697
+Processes = 2
+n = 100000000, p = 2, pi = 3.1415926535902168, relative error = 1.35e-13, time (sec) =   0.0842
+Processes = 4
+n = 100000000, p = 4, pi = 3.1415926535896137, relative error = 5.71e-14, time (sec) =   0.0438
+Processes = 8
+n = 100000000, p = 8, pi = 3.1415926535897754, relative error = 5.65e-15, time (sec) =   0.0624
+Processes = 16
+n = 100000000, p = 16, pi = 3.1415926535897740, relative error = 6.08e-15, time (sec) =   0.0386
+Processes = 32
+n = 100000000, p = 32, pi = 3.1415926535897940, relative error = 2.83e-16, time (sec) =   0.0210
+Processes = 64
+n = 100000000, p = 64, pi = 3.1415926535897931, relative error = 0.00e+00, time (sec) =   0.0165
+ntasks/node = 1
+n = 10000000000, p = 64, pi = 3.1415926535897944, relative error = 4.24e-16, time (sec) =   0.2997
+ntasks/node = 2
+n = 10000000000, p = 64, pi = 3.1415926535897944, relative error = 4.24e-16, time (sec) =   0.3014
+ntasks/node = 3
+n = 10000000000, p = 64, pi = 3.1415926535897944, relative error = 4.24e-16, time (sec) =   0.3010
+ntasks/node = 4
+n = 10000000000, p = 64, pi = 3.1415926535897944, relative error = 4.24e-16, time (sec) =   0.2996
+ntasks/node = 5
+n = 10000000000, p = 64, pi = 3.1415926535897944, relative error = 4.24e-16, time (sec) =   0.3028
+ntasks/node = 6
+n = 10000000000, p = 64, pi = 3.1415926535897944, relative error = 4.24e-16, time (sec) =   0.3049
+ntasks/node = 7
+n = 10000000000, p = 64, pi = 3.1415926535897944, relative error = 4.24e-16, time (sec) =   0.3072
+ntasks/node = 8
+n = 10000000000, p = 64, pi = 3.1415926535897944, relative error = 4.24e-16, time (sec) =   0.3132
+n = 10^2
+n = 100, p = 64, pi = 3.1416009869231249, relative error = 2.65e-06, time (sec) =   0.0002
+n = 10^2, p = 1
+n = 100, p = 1, pi = 3.1416009869231245, relative error = 2.65e-06, time (sec) =   0.0000
+n = 10^4
+n = 10000, p = 64, pi = 3.1415926544231265, relative error = 2.65e-10, time (sec) =   0.0002
+n = 10^4, p = 1
+n = 10000, p = 1, pi = 3.1415926544231318, relative error = 2.65e-10, time (sec) =   0.0000
+n = 10^6
+n = 1000000, p = 64, pi = 3.1415926535898757, relative error = 2.63e-14, time (sec) =   0.0003
+n = 10^6, p = 1
+n = 1000000, p = 1, pi = 3.1415926535899388, relative error = 4.64e-14, time (sec) =   0.0018
+n = 10^8
+n = 100000000, p = 64, pi = 3.1415926535897931, relative error = 0.00e+00, time (sec) =   0.0031
+n = 10^8, p = 1
+n = 100000000, p = 1, pi = 3.1415926535900223, relative error = 7.29e-14, time (sec) =   0.1766

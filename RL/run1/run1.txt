@@ -1,0 +1,1 @@
+run1 had a few more targeted reward scheme changes, decreasing behind_ball and face_ball rewards to further push agents towards touch-rewards. This run was more active, but a few agents are still getting stuck. Looks much better overall, we can move on to experience replay to start training HL agents.

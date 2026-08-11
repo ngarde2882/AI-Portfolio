@@ -1,0 +1,32 @@
+#!/bin/bash
+##ENVIRONMENT SETTINGS; CHANGE WITH CAUTION
+#SBATCH --export=NONE                #Do not propagate environment
+#SBATCH --get-user-env               #Replicate login environment
+#
+##NECESSARY JOB SPECIFICATIONS
+#SBATCH --job-name=hypercube_qsort_strongscale
+#SBATCH --time=0:10:00               #Set the wall clock limit
+#SBATCH --nodes=2                    #Request 1 node
+#SBATCH --ntasks-per-node=32         #Request 1 tasks/cores per node
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=40G                    #Request 200GB per node 
+#SBATCH --output=%j_j3.output           #Send stdout/err to "[jobID].output" 
+#
+##OPTIONAL JOB SPECIFICATIONS
+##SBATCH --mail-type=ALL              #Send email on all job events
+##SBATCH --mail-user=ngarde2882@tamu.edu    #Send all emails to email_address 
+#
+##First Executable Line
+#
+# module load intel         # load Intel software stack 
+module load intel
+#           processes          local list sz    list init method
+# mpirun -np <p> ./qsort_hypercube.exe <n> <type>
+mpirun -np 1 ./qsort_hypercube.exe 20480000 0
+mpirun -np 2 ./qsort_hypercube.exe 10240000 0
+mpirun -np 4 ./qsort_hypercube.exe 5120000 0
+mpirun -np 8 ./qsort_hypercube.exe 2560000 0
+mpirun -np 16 ./qsort_hypercube.exe 1280000 0
+mpirun -np 32 ./qsort_hypercube.exe 640000 0
+mpirun -np 64 ./qsort_hypercube.exe 320000 0
+##

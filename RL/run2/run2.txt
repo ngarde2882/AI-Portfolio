@@ -1,0 +1,2 @@
+run2 added gamestate clustering and experience replay. this run crashed when it hit this phase due to an error initializing the mutator, but we still got cluster data that showed fairly lackluster results (this is only at 1k games, but we would still like to see more activity around the ball)
+reshaped rewards again, incentivizing making contact with the ball at HL and LL, increasing cost of living rewards to prevent idle behaviors, and correcting the ball-touch bonus rewards giving direction after contact meaning. (existed before, now only a positive reward)
